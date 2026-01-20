@@ -49,7 +49,7 @@ Explore the structure of your data and answer these questions:
 glimpse(car_data)
 
 # Check the column names
-
+names(car_data)
 
 # Look at the first few rows
 head(car_data)
@@ -175,7 +175,7 @@ car_data%>%
 
 # Find luxury cars (from price category) with low mileage
 car_data%>%
-  filter(price_category=="luxury")
+  filter(price_category=="luxury", Mileage<30000)
 ```
 
 ## 4.2 Multiple Conditions
