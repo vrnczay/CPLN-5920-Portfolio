@@ -35,7 +35,7 @@ library(tidyverse)
 
 # Read in the car sales data
 # Make sure the data file is in your lab_0/data/ folder
-car_data <- read_csv("C:/Users/muyan/Documents/GitHub/CPLN-5920-Portfolio/CPLN 5920 Lab 0/car_sales_data.csv")
+car_data <- read_csv("data/car_sales_data.csv")
 ```
 
 # Exercise 1: Getting to Know Your Data
