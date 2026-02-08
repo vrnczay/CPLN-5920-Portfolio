@@ -471,7 +471,7 @@ recommendations %>%
 **Your Task:** Use your analysis results to provide specific guidance to the department.
 
 ```{r}
-high_conf_counties <- recommendations_table %>%
+high_conf_counties <- recommendations %>%
   filter(income_reliability == "High Confidence") %>%
   arrange(income_moe_pct) %>%
   pull(county)
@@ -482,7 +482,7 @@ high_conf_counties_text <- paste(high_conf_counties, collapse = ", ")
     Los Angeles, Orange, Sacramento, Santa Clara, Alameda, San Diego, San Bernardino, Contra Costa, Riverside, Fresno, San Francisco, Ventura, Placer, San Joaquin, San Mateo, Solano, Stanislaus, Sonoma, Santa Barbara, Kern, Monterey, Tulare, San Luis Obispo, Yolo, Napa, Marin, Santa Cruz, Kings, Merced, El Dorado, Butte, Mendocino, Shasta, Humboldt, Madera, Imperial, Yuba, Lake, Sutter, Nevada, Siskiyou, Calaveras
     
 ```{r}
-moderate_conf_counties <- recommendations_table %>%
+moderate_conf_counties <- recommendations %>%
   filter(income_reliability == "Moderate Confidence") %>%
   arrange(income_moe_pct) %>%
   pull(county)
@@ -493,7 +493,7 @@ moderate_conf_counties_text <- paste(moderate_conf_counties, collapse = ", ")
 San Benito, Lassen, Glenn, Tuolumne, Tehama, Del Norte, Amador, Colusa, Inyo, Mariposa, Modoc
 
 ```{r}
-low_conf_counties <- recommendations_table %>%
+low_conf_counties <- recommendations %>%
   filter(income_reliability == "Low Confidence") %>%
   arrange(desc(income_moe_pct)) %>%
   pull(county)
