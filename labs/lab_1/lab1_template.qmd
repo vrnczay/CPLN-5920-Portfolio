@@ -1,8 +1,8 @@
 ---
 title: "Lab 1: Census Data Quality for Policy Decisions"
 subtitle: "Evaluating Data Reliability for Algorithmic Decision-Making"
-author: "Your Name Here"
-date: today
+author: "Veronica Zheng"
+date: 2/8/2026
 format: 
   html:
     code-fold: false
