@@ -395,7 +395,7 @@ pattern_table %>%
   kable(caption = "Pattern Analysis by Demographic MOE Severity (ACS 2022 5-year)")
 ```
 
-**Pattern Analysis:** Since almost all the tracts have issue with high MOE in their ethnic groups, I only analyzed the data quality problem within the tracts that with MOE issues because there are only 2 tracts without MOE issues and this is not representative.
+**Pattern Analysis:** Since almost all the tracts have issue with high MOE in their ethnic groups, I only analyzed the data quality problem within the tracts that with MOE issues because there are only 1 tracts without MOE issues and this is not representative (and that tract is showing NA data so thats a data glitch or no-data-tract, which is not helpful for the analysis.)
 
 I grouped g tracts with issues into higher-than-median-MOE and lower-than-median-MOE. The results show that data quality problems are not randomly distributed across communities. The higher MOE group has a slightly smaller average population than the lower MOE group. The average White percentage is almost the same in both groups, while the lower MOE group has a higher average Hispanic percentage and a higher average Black percentage. One tract has missing demographic MOE values due to zero population and was excluded from the pattern analysis.
 
