@@ -1,0 +1,749 @@
+---
+title: "Lab 2: Spatial Analysis and Visualization"
+subtitle: "Healthcare Access and Equity in Pennsylvania"
+author: Veronica Zheng
+date: today
+format: 
+  html:
+    code-fold: false
+    toc: true
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## Assignment Overview
+
+**Learning Objectives:**
+- Apply spatial operations to answer policy-relevant research questions
+- Integrate census demographic data with spatial analysis
+- Create publication-quality visualizations and maps
+- Work with spatial data from multiple sources
+- Communicate findings effectively for policy audiences
+
+---
+
+## Part 1: Healthcare Access for Vulnerable Populations
+
+### Research Question
+
+**Which Pennsylvania counties have the highest proportion of vulnerable populations (elderly + low-income) living far from hospitals?**
+
+Your analysis should identify counties that should be priorities for healthcare investment and policy intervention.
+
+### Required Analysis Steps
+
+Complete the following analysis, documenting each step with code and brief explanations:
+
+#### Step 1: Data Collection (5 points)
+
+Load the required spatial data:
+- Pennsylvania county boundaries
+- Pennsylvania hospitals (from lecture data)
+- Pennsylvania census tracts
+
+**Your Task:**
+```{r set up, echo=FALSE}
+#| message: false
+#| warning: false
+#| results: 'hide'
+# Load required packages
+library(sf)
+library(tidyverse)
+library(tigris)
+library(tidycensus)
+library(scales)
+library(patchwork)
+library(here)
+library(knitr) 
+
+census_api_key(Sys.getenv("CENSUS_API_KEY"))
+
+# Load spatial data
+pa_counties <- st_read(here("data/Pennsylvania_County_Boundaries.shp"))
+hospitals <- st_read(here("data/hospitals.geojson"))
+census_tracts <- tracts(state = "PA", cb = TRUE, year = 2022, class = "sf")
+
+```
+
+```{r step 1 questions}
+#data, number of things, crs
+tibble(
+  data = c("Hospitals", "Census tracts", "PA counties"),
+  number = c(nrow(hospitals), nrow(census_tracts), nrow(pa_counties)),
+  epsg = c(st_crs(hospitals)$epsg, st_crs(census_tracts)$epsg, st_crs(pa_counties)$epsg),
+  crs = c(st_crs(hospitals)$Name, st_crs(census_tracts)$Name, st_crs(pa_counties)$Name)
+) |>
+  kable()
+
+```
+
+**Questions to answer:**
+- How many hospitals are in your dataset?
+
+There are 223 hospitals
+
+- How many census tracts?
+
+There are 3445 tracts
+
+- What coordinate reference system is each dataset in?
+
+Hospitals: 4326	WGS 84
+
+Census tracts: 4269	NAD83
+
+PA counties: 3857	WGS 84 / Pseudo-Mercator
+
+---
+
+#### Step 2: Get Demographic Data 
+
+Use `tidycensus` to download tract-level demographic data for Pennsylvania.
+
+**Required variables:**
+- Total population
+- Median household income
+- Population 65 years and over (you may need to sum multiple age categories)
+
+**Your Task:**
+```{r}
+# Get demographic data from ACS
+vars <- c(
+  pop_total = "B01001_001",
+  med_hhinc = "B19013_001",
+  m_65_66   = "B01001_020",
+  m_67_69   = "B01001_021",
+  m_70_74   = "B01001_022",
+  m_75_79   = "B01001_023",
+  m_80_84   = "B01001_024",
+  m_85_up   = "B01001_025",
+  f_65_66   = "B01001_044",
+  f_67_69   = "B01001_045",
+  f_70_74   = "B01001_046",
+  f_75_79   = "B01001_047",
+  f_80_84   = "B01001_048",
+  f_85_up   = "B01001_049"
+)
+
+PAdemographic <- get_acs(
+  geography = "tract",
+  state = "PA",
+  variables = vars,
+  year = 2022,
+  survey = "acs5",
+  geometry = FALSE,
+  output = "wide"
+) |>
+  transmute(
+    GEOID,
+    pop_total = pop_totalE,
+    med_hhinc = med_hhincE,
+    pop_65plus = m_65_66E + m_67_69E + m_70_74E + m_75_79E + m_80_84E + m_85_upE + f_65_66E + f_67_69E + f_70_74E + f_75_79E + f_80_84E + f_85_upE
+  )
+
+# Join to tract boundaries
+tracts_demo <- census_tracts |>
+  left_join(PAdemographic, by = "GEOID")
+```
+
+**Questions to answer:**
+- What year of ACS data are you using?
+
+2022
+
+- How many tracts have missing income data?
+```{r}
+missing_med_hhinc = sum(is.na(tracts_demo$med_hhinc))
+print(missing_med_hhinc)
+```
+62 have missing income data
+
+- What is the median income across all PA census tracts?
+```{r}
+median_income <- median(tracts_demo$med_hhinc, na.rm = TRUE)
+print(paste0("$", median_income))
+```
+The median income is $70188.
+
+
+---
+
+#### Step 3: Define Vulnerable Populations 
+
+Identify census tracts with vulnerable populations based on TWO criteria:
+
+1. Low median household income (choose an appropriate threshold)
+
+2. Significant elderly population (choose an appropriate threshold)
+
+**Your Task:**
+```{r}
+# Filter for vulnerable tracts based on your criteria
+tracts_demo <- tracts_demo |>
+  mutate(pct_65plus = pop_65plus / pop_total)
+
+low_med_hhinc<- quantile(tracts_demo$med_hhinc, 0.25, na.rm = TRUE)
+sig_elderly_pop<- quantile(tracts_demo$pct_65plus, 0.75, na.rm = TRUE)
+
+vulnerable_tracts<-tracts_demo|>
+  filter(
+    !is.na(med_hhinc),
+    med_hhinc <= low_med_hhinc,
+    pct_65plus >= sig_elderly_pop
+  )
+  
+
+```
+
+**Questions to answer:**
+- What income threshold did you choose and why?
+
+I use the bottom 25% of PA tracts' median household income to filter the relatively low income tracts because this is comparable across the state and easy to interpret.
+
+- What elderly population threshold did you choose and why?
+
+I use the top 25% for the 65+ population share. This is because it is easy to interpret and also comparable across the state. Tracts with higher concentration of elderly are more likelyto face mobility and healthcare challenges.
+
+- How many tracts meet your vulnerability criteria?
+```{r}
+vulnerable_tracts_num<-nrow(vulnerable_tracts)
+print(vulnerable_tracts_num)
+```
+There are 165 tracts meet my criteria.
+
+- What percentage of PA census tracts are considered vulnerable by your definition?
+```{r}
+vulnerable_tracts_pct<-vulnerable_tracts_num/nrow(census_tracts)* 100
+print(paste0(round(vulnerable_tracts_pct, 1), "%"))
+```
+There are 4.8% tracts are considered vulnerable.
+
+---
+
+#### Step 4: Calculate Distance to Hospitals 
+
+For each vulnerable tract, calculate the distance to the nearest hospital.
+
+
+**Your Task:**
+```{r}
+#| warning: false
+# Transform to appropriate projected CRS
+vulnerable_tracts <- st_transform(vulnerable_tracts, 2272)
+hospitals <- st_transform(hospitals, 2272)
+
+# Calculate distance from each tract centroid to nearest hospital
+tract_pts <- st_centroid(vulnerable_tracts)
+nearest_idx <- st_nearest_feature(tract_pts, hospitals)
+dist_ft <- st_distance(tract_pts, hospitals[nearest_idx, ], by_element = TRUE)
+
+vulnerable_tracts$dist_to_hosp_miles <- as.numeric(dist_ft) / 5280
+```
+**Requirements:**
+- Use an appropriate projected coordinate system for Pennsylvania
+- Calculate distances in miles
+- Explain why you chose your projection
+
+I choose NAD83 / Pennsylvania South (ftUS), which is the Pennsylvania State Plane coordinate system. It is accurate for distance measurements n Pennsylvania.
+
+**Questions to answer:**
+```{r}
+avg_dist <- mean(vulnerable_tracts$dist_to_hosp_miles, na.rm = TRUE)
+max_dist <- max(vulnerable_tracts$dist_to_hosp_miles, na.rm = TRUE)
+n_over_15 <- sum(vulnerable_tracts$dist_to_hosp_miles > 15, na.rm = TRUE)
+print(avg_dist)
+print(max_dist)
+print(n_over_15)
+```
+- What is the average distance to the nearest hospital for vulnerable tracts?
+
+The average distance to nearest hospital is 4.75 miles.
+
+- What is the maximum distance?
+
+The maximum distance to nearest hospital is 19.16 miles
+
+- How many vulnerable tracts are more than 15 miles from the nearest hospital?
+
+There are 9 tracts are more than 15 miles from the nearest hospital.
+
+---
+
+#### Step 5: Identify Underserved Areas 
+
+Define "underserved" as vulnerable tracts that are more than 15 miles from the nearest hospital.
+
+**Your Task:**
+```{r}
+# Create underserved variable
+vulnerable_tracts$underserved <- vulnerable_tracts$dist_to_hosp_miles > 15
+
+tracts_demo$vulnerable <- tracts_demo$GEOID %in% vulnerable_tracts$GEOID
+
+
+tracts_demo <- tracts_demo |>
+  left_join(
+    vulnerable_tracts |>
+      st_drop_geometry() |>
+      select(GEOID, dist_to_hosp_miles, underserved),
+    by = "GEOID"
+  ) |>
+  mutate(
+    underserved = ifelse(is.na(underserved), FALSE, underserved)
+  )
+```
+
+**Questions to answer:**
+```{r}
+underserved_tracts <- vulnerable_tracts[vulnerable_tracts$underserved, ]
+print(nrow(underserved_tracts))
+print(nrow(underserved_tracts)/nrow(vulnerable_tracts))
+```
+- How many tracts are underserved?
+
+There are 9 tracts are underserved.
+
+- What percentage of vulnerable tracts are underserved?
+
+There are 5.45% of tracts are underserved.
+
+- Does this surprise you? Why or why not?
+
+It does not surprise me because we have a lot of criteria to define underserved tracts. We have bottom 25% median income+ top 25% elderly as vulnerable tracts, and a spatial criteria of distance >15 miles. Also, we used the euclidean distance to the nearest hospital which will underestimate the real distance. If we switch the distance to road network, the underserved tract may be more.
+
+---
+
+#### Step 6: Aggregate to County Level
+
+Use spatial joins and aggregation to calculate county-level statistics about vulnerable populations and hospital access.
+
+**Required county-level statistics:**
+- Number of vulnerable tracts
+- Number of underserved tracts  
+- Percentage of vulnerable tracts that are underserved
+- Average distance to nearest hospital for vulnerable tracts
+- Total vulnerable population
+
+**Your Task:**
+```{r}
+#| warning: false
+
+pa_counties <- st_transform(pa_counties, 2272)
+tracts_demo  <- st_transform(tracts_demo, 2272)
+
+# 1) Spatial join tracts to counties using a point per tract (avoids duplicates)
+tract_pts <- st_point_on_surface(tracts_demo)
+tracts_with_county <- st_join(tract_pts, pa_counties, join = st_within)
+
+# 2) Aggregate statistics by county
+county_stats <- tracts_with_county |>
+  st_drop_geometry() |>
+  group_by(COUNTY_NAM) |>
+  summarise(
+    n_vulnerable = sum(vulnerable, na.rm = TRUE),
+    n_underserved = sum(underserved, na.rm = TRUE),
+    pct_vuln_underserved = ifelse(n_vulnerable == 0, NA, 100 * n_underserved / n_vulnerable),
+    avg_dist_miles_vulnerable = mean(dist_to_hosp_miles[vulnerable], na.rm = TRUE),
+    total_vulnerable_pop = sum(pop_total[vulnerable], na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(pct_vuln_underserved))
+```
+
+
+**Questions to answer:**
+```{r}
+top5 <- county_stats |>
+  filter(!is.na(COUNTY_NAM), n_vulnerable > 0) |>
+  arrange(desc(pct_vuln_underserved)) |>
+  slice(1:5)
+
+print(top5$COUNTY_NAM)
+
+county_far_pop <- tracts_with_county |>
+  st_drop_geometry() |>
+  filter(!is.na(COUNTY_NAM)) |>
+  group_by(COUNTY_NAM) |>
+  summarise(far_vuln_pop = sum(pop_total[underserved], na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(far_vuln_pop))
+
+top_far <- county_far_pop |> slice(1:5)
+print(top_far$COUNTY_NAM)
+print(top_far$far_vuln_pop)
+
+
+```
+
+- Which 5 counties have the highest percentage of underserved vulnerable tracts?
+
+"BRADFORD" "FOREST"   "JUNIATA"  "MONROE"  and "SULLIVAN" have the highest percentage of underserved vulnerable tracts
+
+- Which counties have the most vulnerable people living far from hospitals?
+
+"BRADFORD"   "DAUPHIN"    "CLEARFIELD" "FOREST"  and  "CRAWFORD" have the most vulnerable people living far from hospitals from 5466 to 2536 people.
+
+- Are there any patterns in where underserved counties are located?
+
+The underserved counties are mostly rural or small-town counties where ospitals are more sparsely distributed so the travel distances can be longer. Especially  Bradford, which has both the highest percentage of underserved vulnerable tracts and population, is located in northern Pennsylvania near the New York border.
+
+---
+
+#### Step 7: Create Summary Table 
+
+Create a professional table showing the top 10 priority counties for healthcare investment.
+
+**Requirements:**
+- Use `knitr::kable()` or similar for formatting
+- Include descriptive column names
+- Format numbers appropriately (commas for population, percentages, etc.)
+- Add an informative caption
+- Sort by priority 
+
+  My priority metric is vulnerable population living > 15mlies, and the second metric is the vulnerable population share (since I only have 9 tracts of underserve tracts, in order to have a list of 10 counties, I add the second metric).
+
+**Your Task:**
+```{r}
+# county total population (all tracts)
+county_total_pop <- tracts_with_county |>
+  st_drop_geometry() |>
+  filter(!is.na(COUNTY_NAM)) |>
+  group_by(COUNTY_NAM) |>
+  summarise(total_pop = sum(pop_total, na.rm = TRUE), .groups = "drop")
+
+priority_counties <- county_stats |>
+  filter(!is.na(COUNTY_NAM), n_vulnerable > 0) |>
+  left_join(county_far_pop, by = "COUNTY_NAM") |>
+  left_join(county_total_pop, by = "COUNTY_NAM") |>
+  mutate(
+    far_vuln_pop = ifelse(is.na(far_vuln_pop), 0, far_vuln_pop),
+    vuln_pop_share = total_vulnerable_pop / total_pop
+  ) |>
+  arrange(
+    desc(far_vuln_pop),     # Priority 1
+    desc(vuln_pop_share)    # Priority 2 (tie-breaker)
+  ) |>
+  slice(1:10) |>
+  transmute(
+    County = COUNTY_NAM,
+    `Vulnerable population >15 miles (priority 1)` = scales::comma(far_vuln_pop),
+    `Vulnerable population share (priority 2)` = scales::percent(vuln_pop_share, accuracy = 0.1),
+    `Vulnerable tracts (count)` = n_vulnerable,
+    `Underserved tracts (count)` = n_underserved,
+    `Underserved share of vulnerable tracts` = scales::percent(pct_vuln_underserved/100, accuracy = 0.1),
+    `Avg distance to hospital (vulnerable tracts, miles)` = round(avg_dist_miles_vulnerable, 2)
+  )
+
+knitr::kable(
+  priority_counties,
+  caption = "Top 10 priority counties"
+)
+
+```
+
+
+
+---
+
+## Part 2: Comprehensive Visualization 
+
+Using the skills from Week 3 (Data Visualization), create publication-quality maps and charts.
+
+### Map 1: County-Level Choropleth 
+
+Create a choropleth map showing healthcare access challenges at the county level.
+
+**Your Task:**
+```{r}
+pa_counties_map <- pa_counties |>
+  left_join(county_stats, by = "COUNTY_NAM")
+
+ggplot() +
+  geom_sf(
+    data = pa_counties_map,
+    aes(fill = pct_vuln_underserved),
+    color = "white",
+    linewidth = 0.2
+  ) +
+  geom_sf(
+    data = hospitals,   # assumes hospitals is already EPSG:2272
+    color = "red",
+    size = 0.8,
+    alpha = 0.6
+  ) +
+  scale_fill_viridis_c(
+    option = "C",
+    na.value = "grey90",
+    labels = function(x) paste0(round(x, 0), "%"),
+    name = "Underserved\nshare (%)"
+  ) +
+  labs(
+    title = "Healthcare Access Challenges in Pennsylvania",
+    subtitle = "Counties shaded by % of vulnerable tracts that are underserved (>15 miles from nearest hospital)",
+    caption = "Source: ACS 2022 (5-year) via tidycensus; County boundaries + tracts via tigris; Hospitals from lecture dataset."
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    plot.caption = element_text(size = 8)
+  )
+
+```
+
+**Requirements:**
+- Fill counties by percentage of vulnerable tracts that are underserved
+- Include hospital locations as points
+- Use an appropriate color scheme
+- Include clear title, subtitle, and caption
+- Use `theme_void()` or similar clean theme
+- Add a legend with formatted labels
+
+---
+
+### Map 2: Detailed Vulnerability Map 
+
+Create a map highlighting underserved vulnerable tracts.
+
+**Your Task:**
+```{r}
+# Create detailed tract-level map
+underserved_tracts <- vulnerable_tracts |> filter(underserved)
+
+
+ggplot() +
+  geom_sf(
+    data = tracts_demo,
+    fill = "grey92",
+    color = NA
+  ) +
+  # County boundaries for context
+  geom_sf(
+    data = pa_counties,
+    fill = NA,
+    color = "white",
+    linewidth = 0.3
+  ) +
+  # Underserved vulnerable tracts
+  geom_sf(
+    data = underserved_tracts,
+    fill = "red",
+    color = "white",
+    linewidth = 0.2
+  ) +
+  # Hospitals on top
+  geom_sf(
+    data = hospitals,
+    color = "black",
+    size = 0.8,
+    alpha = 0.7
+  ) +
+  labs(
+    title = "Underserved Vulnerable Census Tracts in Pennsylvania",
+    subtitle = "Highlighted vulnerable tracts >15 miles from the nearest hospital",
+    caption = "Source: ACS 2022 (5-year) via tidycensus; County boundaries + tracts via tigris; Hospitals from lecture dataset."
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    plot.caption = element_text(size = 8),
+    legend.position = "none"
+  )
+
+
+
+```
+
+**Requirements:**
+- Show underserved vulnerable tracts in a contrasting color
+- Include county boundaries for context
+- Show hospital locations
+- Use appropriate visual hierarchy (what should stand out?)
+- Include informative title and subtitle
+
+---
+
+### Chart: Distribution Analysis
+
+Create a visualization showing the distribution of distances to hospitals for vulnerable populations.
+
+**Your Task:**
+```{r}
+# Create distribution visualization
+ggplot(vulnerable_tracts, aes(x = dist_to_hosp_miles)) +
+  geom_histogram(bins = 30) +
+  geom_vline(xintercept = 15, linetype = "dashed") +
+  labs(
+    title = "Distribution of Distance to the Nearest Hospital (Vulnerable Tracts)",
+    subtitle = "Dashed line indicates the underserved threshold (15 miles)",
+    x = "Distance to nearest hospital (miles)",
+    y = "Number of vulnerable census tracts"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+**Suggested chart types:**
+- Histogram or density plot of distances
+- Box plot comparing distances across regions
+- Bar chart of underserved tracts by county
+- Scatter plot of distance vs. vulnerable population size
+
+**Requirements:**
+- Clear axes labels with units
+- Appropriate title
+- Professional formatting
+- Brief interpretation (1-2 sentences as a caption or in text)
+
+---
+
+## Part 3: Bring Your Own Data Analysis 
+
+Choose your own additional spatial dataset and conduct a supplementary analysis.
+
+---
+
+#### Emergency Services
+
+**Option G: EMS Response Coverage**
+- **Data:** Fire Stations, EMS stations, Population density, High-rise buildings
+- **Question:** "Are population-dense areas adequately covered by emergency services?"
+- **Operations:** Create service area buffers (5-minute drive = ~2 miles), assess population coverage, identify gaps in high-density areas
+- **Policy relevance:** Emergency preparedness, station siting decisions
+
+---
+
+### Data Sources
+
+**OpenDataPhilly:** https://opendataphilly.org/datasets/
+- Most datasets available as GeoJSON, Shapefile, or CSV with coordinates
+- Always check the Metadata for a data dictionary of the fields.
+
+**Additional Sources:**
+- **Pennsylvania Open Data:** https://data.pa.gov/
+- **Census Bureau (via tidycensus):** Demographics, economic indicators, commute patterns
+- **TIGER/Line (via tigris):** Geographic boundaries
+
+### Your Analysis
+
+**Your Task:**
+
+1. **Find and load additional data**
+   - Document your data source
+   - Check and standardize the CRS
+   - Provide basic summary statistics
+
+```{r set up 2, echo=FALSE}
+#| message: false
+#| warning: false
+#| results: 'hide'
+# Load additional dataset: Fire & EMS Stations (HIFLD Open)
+stations_raw <- st_read(here("data/hifld_fire_ems_stations.geojson"), quiet = TRUE)
+
+stations_raw <- st_transform(stations_raw, 2272)
+
+# Filter Pennsylvania using the existing STATE field
+stations_pa <- stations_raw |> filter(STATE == "PA")
+
+
+print( nrow(stations_raw))
+print( nrow(stations_pa))
+
+
+```
+
+**Questions to answer:**
+- What dataset did you choose and why?
+
+I chose the HIFLD Open Fire and Emergency Medical Service (EMS) Stations dataset because it provides statewide point locations of emergency service facilities.
+
+- What is the data source and date?
+
+The data source is HIFLD Open (Homeland Infrastructure Foundation-Level Data) Fire and EMS Stations. The last modified dats is 10/24/2025.
+
+- How many features does it contain?
+
+It contains 52057 points total, and points within PA is 2592.
+
+- What CRS is it in? Did you need to transform it?
+
+The crs is 4326 WGS 84. I transform that to 2272.
+
+---
+
+2. **Pose a research question**
+
+Are vulnerable populations in Pennsylvania adequately covered by EMS stations within 2-mile response distance?
+
+---
+
+3. **Conduct spatial analysis**
+
+Use at least TWO spatial operations to answer your research question.
+
+**Required operations (choose 2+):**
+- Buffers
+- Spatial joins
+- Spatial filtering with predicates
+- Distance calculations
+- Intersections or unions
+- Point-in-polygon aggregation
+
+**Your Task:**
+```{r}
+# 1) Buffer EMS stations: 2 miles = 2*5280 ft
+ems_bufs <- st_buffer(stations_pa, dist = 2 * 5280)
+
+# 2) Centroid for each vulnerable tract
+vuln_pts <- suppressWarnings(st_centroid(vulnerable_tracts))
+
+# 3) Coverage: point intersects ANY buffer (fast)
+hit_list <- st_intersects(vuln_pts, ems_bufs)   # sparse list
+vulnerable_tracts$ems_covered <- lengths(hit_list) > 0
+
+# Summary counts
+print(paste("Vulnerable tracts covered (<=2 miles):", sum(vulnerable_tracts$ems_covered)))
+print(paste("Vulnerable tracts NOT covered:", sum(!vulnerable_tracts$ems_covered)))
+
+```
+```{r final map}
+vuln_not_covered <- vulnerable_tracts |> filter(!ems_covered)
+
+ggplot() +
+  geom_sf(data = pa_counties, fill = "grey95", color = "white", linewidth = 0.2) +
+  geom_sf(data = ems_bufs, fill = NA, color = "blue", linewidth = 0.2) +
+  geom_sf(data = vuln_not_covered, fill = "red", color = "white", linewidth = 0.2) +
+  geom_sf(data = stations_pa, color = "black", size = 0.3, alpha = 0.6) +
+  labs(
+    title = "EMS Coverage for Vulnerable Tracts (2-mile Buffer)",
+    subtitle = "Red tracts: vulnerable centroids NOT inside any EMS station buffer",
+    caption = "2 miles is straight-line buffer distance (not driving time)."
+  ) +
+  theme_void()
+```
+**Analysis requirements:**
+- Clear code comments explaining each step
+- Appropriate CRS transformations
+- Summary statistics or counts
+- At least one map showing your findings
+- Brief interpretation of results (3-5 sentences)
+
+**Your interpretation:**
+Using a 2-mile buffer around EMS stations, 140 of 165 vulnerable tracts are covered, and 25 are not covered. On the map, the not covered red trats are mostly outside the dense station clusters, which suggests gaps are more likely in less urban areas. However, this is a straight-line distance test using tract centroids, and the 2-mile buffer is a simple measure that does not reflect driving time, so actual EMS response times could be very different. It also depends on more factors such as vulnerable population density a block level.
+
+
+## Finally - A few comments about your incorporation of feedback!
+I improved the presentation of my portfolio by hiding setup code and unnecessary messages. I improved the presentation of my portfolio by hiding setup code and suppressing unnecessary messages. I removed my Census API key from the visible document and relied on environment variables instead.
+
+---
+
+
+
+
