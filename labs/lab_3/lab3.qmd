@@ -1,0 +1,1421 @@
+---
+title: "Philadelphia Housing Model"
+subtitle: "Home Price Prediction in Philadelphia"
+
+format: 
+  html:
+    code-fold: false
+    toc: true
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+::::: grid
+::: g-col-6
+**AUTHOR**
+
+Zhuosi Yang, Veronica Zheng, Yiting Zhong, Coco Zhou
+:::
+
+::: g-col-6
+**PUBLISHED**
+
+March 14, 2026
+:::
+:::::
+
+**Content:**
+
+-   Data Sources
+-   Data Preparation & Cleaning
+-   Exploratory Data Analysis
+-   Feature Engineering
+-   Model Building
+-   Diagnostic plots
+-   Conclusion & Interpretations
+
+## Data Sources
+
+### Primary Dataset: Philadelphia Property Sales
+
+**Source:** [Philadelphia Property Sales](https://catalog.data.gov/dataset/philadelphia-properties-and-assessment-history)
+
+This study uses the Philadelphia Property Sales dataset as the primary data source for modeling residential housing prices. The dataset contains detailed information on property transactions and structural housing characteristics.
+
+The primary dataset contains property-level structural characteristics and sale information used to model housing sale prices. The following variables were included:
+
+-   **Sale price** *(target variable)*
+-   **Year built**
+-   **Housing size (Total Livable Area)**
+-   **Number of bedrooms**
+-   **Number of bathrooms**
+-   **Interior condition**
+-   **Exterior condition**
+-   **Garage spaces**
+-   **Fireplaces**
+-   **Basements**
+
+The corresponding variable names in the dataset are:
+
+-   `sale_price`
+-   `year_built`
+-   `total_livable_area`
+-   `number_of_bedrooms`
+-   `number_of_bathrooms`
+-   `interior_condition`
+-   `exterior_condition`
+-   `garage_spaces`
+-   `fireplaces`
+-   `basements`
+
+The variable **`sale_date`** is used only for filtering observations to include property transactions from **2023–2024**.
+
+### Secondary Spatial and Neighborhood Datasets
+
+Several spatial variables were incorporated to capture neighborhood characteristics and accessibility factors that influence housing prices.
+
+**Source:** [OpenDataPhilly](https://opendataphilly.org/)
+
+#### Crime
+
+Crime data were included to represent neighborhood safety conditions.
+
+**Source:**\
+[Philadelphia Crime Incidents](https://opendataphilly.org/datasets/crime-incidents/)
+
+#### Schools
+
+School locations were included to represent access to educational resources.
+
+**Source:**\
+[Philadelphia Schools](https://opendataphilly.org/datasets/schools/)
+
+#### Major Parks
+
+Parks were included to represent access to green space and recreational amenities.
+
+**Source:**\
+[Philadelphia PPR Properties](https://opendataphilly.org/datasets/ppr-properties/)
+
+
+#### Transit Stops
+
+Transit stop locations were used to represent access to public transportation.
+
+**Source:**\
+[SEPTA All Transit Stops (Bus, Trolley, Rail)](https://opendataphilly.org/datasets/septa-routes-stops-locations/)
+
+#### Vacant Properties
+
+Vacant property locations were included to represent neighborhood vacancy conditions.
+
+**Source:**\
+[Philadelphia Vacant Property Indicators](https://opendataphilly.org/datasets/vacant-property-indicators/)
+
+#### Census Demographic Data
+
+Demographic characteristics were derived from U.S. Census data.
+
+Variables include:
+
+-   Median household income\
+-   Percentage of households without a vehicle
+
+#### Interaction and Nonlinear Variables
+
+Additional interaction variables were created to capture relationships between transportation access and neighborhood characteristics.
+
+-   Transit accessibility × percentage of households with no vehicle
+
+### Reasons for choosing the datasets:
+
+Our model constructs a property-level dataset designed to investigate the physical characteristics of each home and the spatial context around it because housing prices are influenced not only by structural attributes, but also by neighborhood conditions. For this reason, the dataset combines traditional housing attributes with a series of engineered spatial variables.
+
+The structural characteristics describe the physical condition of each home. These include the year the structure was built, the total livable area of the home, the number of bedrooms, the number of bathrooms, and the presence of features such as garages, fireplaces, and basements. Interior and exterior condition ratings were also included to capture the quality of the structure. Based on buyers’ needs, different structural features provide different types of convenience for different groups of people, which allows properties to be marketed more effectively and potentially achieve more favorable sale prices. Homes with larger living areas and better overall quality also tend to command higher prices. These factors are inherently reflected in the structural features of the property.
+
+Beyond the structure of the house, the surrounding neighborhood environment is important in determining property value. One key factor is crime exposure. The assumption is that homes located in areas with higher nearby crime activity may experience lower property values. Access to public amenities and services was also important for property values. Shorter distances to public transit indicate easier access to employment centers and mobility options, which can increase the desirability of a property. Similarly, access to green space provides recreational and environmental benefits, and homes located closer to parks are often perceived as more attractive to buyers. Access to social infrastructure, such as schools, was also incorporated. These services contribute to neighborhood livability and can influence property value.
+
+The socioeconomic context from U.S. Census data was also incorporated. Median household income and the percentage of households without a vehicle were attached to each property through spatial joins with census geography. Median income serves as a proxy for neighborhood economic conditions. An interaction variable between transit accessibility and the percentage of households without vehicles was created to capture local transportation dependence, reflecting that transit access may be more valuable in areas where residents rely more heavily on public transportation.
+
+Finally, neighborhood physical conditions were measured through the presence of vacant properties. Higher concentrations of vacancy may signal neighborhood disinvestment, which can negatively influence nearby property values.
+
+Overall, the resulting model incorporates a comprehensive set of property and environmental factors that influence housing sale prices, better reflecting real-world housing market conditions.
+
+## Data Preparation & Cleaning
+
+```{r setup, include=FALSE}
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(dplyr)
+library(stringr)
+library(tidycensus)
+library(sf)
+library(scales)
+library(tigris)
+library(ggplot2)
+library(patchwork)
+library(viridis)
+library(car)
+library(tibble)
+library(knitr)
+library(caret)
+library(purrr)
+library(spdep)
+library(sfdep)
+library(broom)
+library(lmtest)
+library(here)
+library(classInt)
+
+#census api key
+readRenviron("~/.Renviron")
+# coordinate
+PHL_EPSG <- 32129
+```
+
+Load primary data:
+
+```{r load primary data}
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# Load dataset
+opa <- read_sf(here("data", "opa_properties_public.geojson"))
+```
+
+Clean primary data:
+
+```{r clean primary data: opa_clean}
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+#filter residential data category code=1
+opa_res <- opa %>%
+  filter(category_code == 1)
+
+#filter sale_date range 2023-2024
+opa_res_date <- opa_res %>%
+  filter(
+    sale_date >= "2023-01-01 00:00:00",
+    sale_date <= "2024-12-31 23:59:59"
+  )
+
+
+opa_res_date <- opa_res_date %>%
+  mutate(
+    basement_score = dplyr::recode(
+      basements,
+      "A" = 9,
+      "B" = 8,
+      "C" = 7,
+      "D" = 6,
+      "E" = 5,
+      "F" = 4,
+      "G" = 3,
+      "H" = 2,
+      "I" = 1,
+      .default = NA_real_
+    )
+  )
+#remove NA in primary dataset features
+opa_clean <- opa_res_date %>%
+  drop_na(
+    sale_price,
+    year_built,
+    total_livable_area,
+    number_of_bedrooms,
+    number_of_bathrooms,
+    interior_condition,
+    exterior_condition,
+    garage_spaces,
+    fireplaces,
+    basement_score,
+    census_tract,
+    market_value
+  )
+
+#construct opa_clean with all relative columns
+opa_clean <- opa_clean %>%
+  select(
+    sale_price,
+    sale_date,
+    year_built,
+    total_livable_area,
+    number_of_bedrooms,
+    number_of_bathrooms,
+    interior_condition,
+    exterior_condition,
+    garage_spaces,
+    fireplaces,
+    basement_score,
+    census_tract,
+    market_value
+  )%>%
+  filter(sale_price >= 1000) %>% #obvious error 1: there are some sale prices equal to 0,1,10 so I filter them out
+  filter(number_of_bathrooms >0) #obvious error 2 (assumption): Observations with zero bathrooms were removed because residential properties typically contain at least one bathroom. (but for bedroom it's OK to have 0 bedroom because it may be studio.)
+
+opa_clean <- opa_clean %>% #create new variable: calculate house age base on sale year
+  mutate(
+    house_age = year(sale_date) - as.numeric(year_built)
+  )
+
+```
+
+Load secondary data:
+
+```{r load secondary data 1: data from census}
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+#select Philadelphia census tracts, convert to PA South for mapping
+phl_tracts <- tracts(state = "PA", county = "Philadelphia", cb = TRUE, year = 2022) %>%
+  st_transform(PHL_EPSG)
+
+# Pull ACS variables (2022 ACS 5-year)
+acs_vars <- c(
+  median_income    = "B19013_001",  # median household income
+  total_households = "B08201_001",  # total households
+  no_vehicle       = "B08201_002"   # households with 0 vehicles
+)
+
+phl_acs <- get_acs(
+  geography = "tract",
+  state = "PA",
+  county = "Philadelphia",
+  variables = acs_vars,
+  year = 2022,
+  survey = "acs5",
+  geometry = FALSE
+) %>%
+  select(GEOID, variable, estimate) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  mutate(
+    pct_no_vehicle = no_vehicle / total_households
+  ) %>%
+  select(GEOID, median_income, pct_no_vehicle)
+
+# join to tract geometry
+phl_tracts <- phl_tracts %>%
+  left_join(phl_acs, by = "GEOID")
+```
+
+```{r load secondary data 2: data from other sources}
+### load remote dataset
+
+CRIME_2024_URL <- "https://phl.carto.com/api/v2/sql?filename=incidents_part1_part2&format=csv&q=SELECT%20*%20,%20ST_Y(the_geom)%20AS%20lat,%20ST_X(the_geom)%20AS%20lng%20FROM%20incidents_part1_part2%20WHERE%20dispatch_date_time%20%3E=%20%272024-01-01%27%20AND%20dispatch_date_time%20%3C%20%272025-01-01%27"
+
+CRIME_2023_URL <- "https://phl.carto.com/api/v2/sql?filename=incidents_part1_part2&format=csv&q=SELECT%20*%20,%20ST_Y(the_geom)%20AS%20lat,%20ST_X(the_geom)%20AS%20lng%20FROM%20incidents_part1_part2%20WHERE%20dispatch_date_time%20%3E=%20%272023-01-01%27%20AND%20dispatch_date_time%20%3C%20%272024-01-01%27"
+
+
+SCHOOLS_URL <- "https://hub.arcgis.com/api/v3/datasets/d46a7e59e2c246c891fbee778759717e_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1"
+
+PARKS_URL <- "https://hub.arcgis.com/api/v3/datasets/d52445160ab14380a673e5849203eb64_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1"
+
+SEPTA_URL <- "https://hub.arcgis.com/api/v3/datasets/b227f3ddbe3e47b4bcc7b7c65ef2cef6_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1"
+
+VACANT_URL <- "https://hub.arcgis.com/api/v3/datasets/f7ed68293c5e40d58f1de9c8435c3e84_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1"
+
+#combine crime 2023 and 2024 to crime_all
+crime2024 <- read_csv(CRIME_2024_URL, show_col_types = FALSE)
+crime2023 <- read_csv(CRIME_2023_URL, show_col_types = FALSE)
+crime_all <- bind_rows(crime2023, crime2024)
+
+#read the rest of csv if you cannot run these just select lines below and rerun the selected line, took me a while to run these, rerun and rerun again and again~~~
+schools <- read_sf(SCHOOLS_URL)
+parks   <- read_sf(PARKS_URL)
+septa   <- read_sf(SEPTA_URL)
+vacant  <- read_sf(VACANT_URL)
+
+```
+
+Clean secondary data:
+
+```{r clean secondary data}
+# remove records without coordinates (only crime data has some lines without xy)
+crime_clean <- crime_all %>%
+  filter(!is.na(lat), !is.na(lng)) %>%
+  st_as_sf(coords = c("lng", "lat"), crs = 4326, remove = FALSE) %>%
+  st_transform(PHL_EPSG)
+
+schools_clean <- schools %>%
+  filter(!st_is_empty(geometry)) %>%
+  st_transform(PHL_EPSG)
+
+parks_clean <- parks %>%
+  filter(!st_is_empty(geometry)) %>%
+  st_transform(PHL_EPSG)
+
+septa_clean <- septa %>%
+  filter(!st_is_empty(geometry)) %>%
+  st_transform(PHL_EPSG)
+
+vacant_clean <- vacant %>%
+  filter(!st_is_empty(geometry)) %>%
+  st_transform(PHL_EPSG)
+
+```
+
+### Data cleaning methods:
+
+**Primary Data Cleaning**
+
+Property transactions were filtered using the recorded sale date to include only sales from 2023 to 2024, as these recent transactions better reflect current housing market trends. Each parcel was represented as a spatial geometry, and the property locations were projected into a consistent coordinate reference system so that the spatial relationships could be accurately measured. This is important because a property’s location determines the influence of its surrounding environment. The dataset was also filtered to retain only residential properties by selecting residential category code=1. Several cleaning steps were applied to improve data quality and ensure the reliability of the modeling dataset. Observations with missing values in key structural variables such as sale price, year built, total livable area, number of bedrooms, number of bathrooms, interior condition, exterior condition, garage spaces, fireplaces, basement condition, and census tract were removed to avoid incomplete records. Obvious data entry errors were also addressed. For example, transactions with sale prices equal to extremely small values, such as 0, 1, or 10 were removed because these likely represent recording errors or non-market transactions. Properties with zero bathrooms were excluded based on the assumption that residential units typically contain at least one bathroom. But we did not filter bedroom=0 because we assume this may be a studio. Additionally, basement condition categories were converted into a numerical score to make them usable in quantitative modeling. A new variable representing house age was calculated by subtracting the year built from the sale year.
+
+**Secondary Data Cleaning**
+
+Secondary datasets describing neighborhood conditions and accessibility were obtained from multiple external sources, including crime incidents, schools, parks, transit stops, and vacant properties. These datasets were first converted into spatial objects and projected into a consistent coordinate reference system so that spatial operations such as distance calculations, buffers, and spatial joins could be performed accurately. Crime data from 2023 and 2024 were combined to represent recent neighborhood safety conditions, and records without geographic coordinates were removed to ensure that all incidents could be mapped correctly. For other spatial datasets, records with empty geometries were removed to prevent errors during spatial analysis. All datasets were then transformed into the same projection system to maintain spatial consistency across layers.
+
+## Exploratory Data Analysis
+
+### 1. Histogram: Distribution of sale prices
+
+```{r histogram: Distribution of Sale Prices}
+
+ggplot(opa_clean, aes(x = sale_price)) +
+  geom_histogram(fill = "lightblue", bins = 100) +
+  geom_vline(aes(xintercept = median(sale_price, na.rm = TRUE)),
+             color = "grey40", linewidth = 0.5) +
+  annotate("text",
+           x = median(opa_clean$sale_price, na.rm = TRUE),
+           y = Inf,
+           vjust = 4,
+           hjust = -0.1,
+           label = paste0(
+             "Median = $",
+             formatC(median(opa_clean$sale_price, na.rm = TRUE),
+                     format = "f",
+                     big.mark = ",",
+                     digits = 0)
+           ),
+           color = "grey40",
+           size = 3) +
+  labs(
+    title = "Distribution of Philadelphia Home Sale Prices",
+    x = "Sale Price (USD)",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(labels = scales::dollar)
+
+```
+
+**Interpretation:**
+
+The figure shows the distribution of Philadelphia home sale prices in 2023-2024. The distribution is extremely right-skewed, meaning that a small number of very high-priced luxury property sales pull the distribution toward the right. Some sale prices exceed \$6,000,000, which likely represent luxury Center City condominiums and large historic houses.
+
+However, most sale prices are clustered between \$50,000 and \$500,000. This phenomenon indicates that the majority of homes fall within this price range, representing the core housing market in Philadelphia. More specifically, there is a large concentration of homes priced between \$100,000 and \$300,000. These prices typically correspond to rowhouses, older urban housing stock, and smaller single-family homes. This pattern reflects that Philadelphia has a substantial portion of housing stock that remains relatively affordable compared with many other major U.S. cities.
+
+The median sale price is \$240,000, meaning that half of the properties sold for less than \$240,000 and half sold for more. Because the median is not affected by extreme values, it better represents the typical residential sale price in Philadelphia.
+
+Overall, the Philadelphia housing market shows two informal price segments: a large core housing market and a much smaller luxury market.
+
+### 2. Map: Distribution of Philadelphia Home Sale Prices
+
+```{r Distribution of Philadelphia Home Sale Prices}
+# Load Philadelphia neighborhood boundary
+neigh_url <- "https://raw.githubusercontent.com/opendataphilly/open-geo-data/refs/heads/master/philadelphia-neighborhoods/philadelphia-neighborhoods.geojson"
+
+neigh <- sf::read_sf(neigh_url)
+
+# Match CRS with property data
+neigh <- st_transform(neigh, st_crs(opa_clean))
+
+opa_sf <- st_as_sf(
+  opa_clean,
+  coords = c("longitude", "latitude"),   
+  crs = 4326,
+  remove = FALSE
+) %>%
+  st_transform(st_crs(phl_tracts))
+
+# Map
+p_price_map <- ggplot() +
+  geom_sf(
+    data = neigh,
+    fill = NA,
+    color = "grey75",
+    linewidth = 0.25
+  ) +
+  geom_sf(
+    data = opa_sf,
+    aes(color = sale_price),
+    alpha = 0.65,
+    size = 0.18
+  ) +
+  scale_color_viridis_c(
+    name   = "Sale price (USD)",
+    option = "magma",
+    direction = -1,
+    labels = scales::dollar,
+    limits = c(60000, 1200000),
+    oob    = scales::squish,
+    breaks = c(100000, 200000, 300000, 400000, 600000, 800000, 1000000, 1200000)
+  ) +
+  guides(
+    color = guide_colorbar(barheight = grid::unit(4, "cm"))
+  ) +
+  coord_sf() +
+  labs(
+    title    = "Geographical Distribution of Philadelphia Home Sale Prices",
+    subtitle = "Each property colored by sale price"
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    legend.position = c(0.92, 0.25),
+    plot.title      = element_text(face = "bold", hjust = 0),
+    plot.subtitle   = element_text(hjust = 0)
+  )
+
+p_price_map
+```
+
+**Interpretation:**
+
+The figure shows the geographical distribution of Philadelphia home sale prices in 2023–2024. It indicates a very strong spatial pattern in Philadelphia’s home sale prices. The darker purple dots represent higher sale prices, while the lighter yellow dots represent lower sale prices.
+
+Higher-priced homes are highly concentrated in Center City and surrounding neighborhoods, particularly in areas near Rittenhouse Square, Society Hill, and parts of South Philadelphia close to downtown. These locations contain many properties with sale prices above \$600,000 and up to \$1,200,000. Another cluster of high-priced homes is in Northwest Philadelphia, where the suburban environment provides larger land parcels for single-family homes and suburban-style housing.
+
+Lower-priced homes are widely distributed across North Philadelphia, West Philadelphia, and parts of Northeast Philadelphia. These areas contain a large number of homes selling for \$100,000 to \$300,000, which aligns with the core housing market identified in the price distribution histogram.
+
+Overall, the map shows that housing prices in Philadelphia are strongly influenced by location. This relates to how we will select urban characteristics associated with location to predict sale prices, such as neighborhood characteristics, school quality, transit access, and the importance of local amenities.
+
+### 3. Price vs. structural features
+
+```{r Price vs. structural features}
+# common theme
+base_theme <- theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9)
+  )
+
+# 1) Livable area vs price (scatter + loss)
+p_area <- ggplot(opa_clean, aes(x = total_livable_area, y = sale_price)) +
+  geom_point(alpha = 0.20, size = 0.7, color = "#1f77b4") +
+  scale_y_continuous(labels = dollar) +
+  scale_x_continuous(labels = comma) +
+  coord_cartesian(xlim = c(300, 5000), ylim = c(60000, 2000000)) +
+  labs(title = "Price vs Livable Area", x = "Livable Area (sq ft)", y = "Sale Price") +
+  base_theme
+
+# 2) Year built vs price (hex density + smooth on binned year)
+p_year <- ggplot(
+  opa_clean %>% filter(!is.na(house_age)),
+  aes(x = house_age, y = sale_price)
+) +
+  geom_hex(bins = 35) +
+  scale_fill_viridis_c(option = "plasma") +
+  scale_y_continuous(labels = dollar) +
+  labs(
+    title = "Price vs House Age (Density)",
+    x = "House Age at Time of Sale (years)",
+    y = "Sale Price",
+    fill = "Count"
+  ) +
+  base_theme +
+  theme(legend.position = "right")
+
+# 3) Bedrooms vs price (jitter + loess)
+p_bed <- ggplot(opa_clean, aes(x = number_of_bedrooms, y = sale_price)) +
+  geom_jitter(alpha = 0.18, width = 0.15, height = 0, size = 0.7, color = "#2ca02c") +
+  scale_y_continuous(labels = dollar) +
+  coord_cartesian(ylim = c(60000, 2000000)) +
+  labs(title = "Price vs Bedrooms", x = "Bedrooms", y = "Sale Price") +
+  base_theme
+
+# 4) Bathrooms vs price (jitter + loess)
+p_bath <- ggplot(opa_clean, aes(x = number_of_bathrooms, y = sale_price)) +
+  geom_jitter(alpha = 0.18, width = 0.12, height = 0, size = 0.7, color = "#9467bd") +
+  scale_y_continuous(labels = dollar) +
+  coord_cartesian(ylim = c(60000, 2000000)) +
+  labs(title = "Price vs Bathrooms", x = "Bathrooms", y = "Sale Price") +
+  base_theme
+
+# combine (2x2)
+(p_area | p_year) / (p_bed | p_bath)
+
+```
+
+**Interpretation:**
+
+1.  The first scatter plot shows the relationship between **livable area (square feet) and sale price**. The graph reveals a strong positive relationship between housing size and sale price. As the livable area increases, the sale price generally increases as well. Most homes cluster between 800 and 2,500 square feet, with sale prices ranging roughly from \$100,000 to \$600,000. Larger homes above 3,000 square feet tend to command higher prices, often exceeding \$800,000 or even \$1,000,000, though the variation widens. The graph shows a positive relationship between livable area and price. However, it also shows that homes with similar sizes can have very different prices. There may be other factors that influence the price, such as location, neighborhood characteristics, and amenities.
+
+2.  The **Price vs House Age** density scatterplot shows the relationship between the age of a house at the time of sale and its sale price. The brighter colors indicate a higher concentration of transactions. Most homes are concentrated between about 50 and 120 years old. This shows the older rowhouses and historic building stocks in Philadelphia. Within this age range, most sale prices fall below \$500,000, although there are still some higher-priced outliers. Homes that are very new or very old appear less frequently in the dataset, but some of them command higher sale prices than others, so the fluctuation in age and sale prices does not yield a clear pattern.
+
+3.  The **Price vs Bedrooms** scatterplot shows the distribution of sale prices across different numbers of bedrooms. Most homes have between 2 and 5 bedrooms. Sale prices within these bedroom categories cover a wide range, although many fall below \$500,000. Homes with 4 to 6 bedrooms show a broader range of prices and include several higher-priced properties reaching above \$1,000,000. Properties with very high bedroom counts appear less frequently and are more dispersed in the dataset. This graph shows a generally positive relationship between the number of bedrooms and sale price, where homes with more bedrooms tend to have higher prices. However, homes with very high bedroom counts appear much less frequently in the dataset. Because these observations are rare, the pattern in the higher bedroom categories appears to show a slight decreasing trend.
+
+4.  The **Price vs Bathrooms** scatterplot shows the distribution of sale prices across different numbers of bathrooms. Most properties have between 1 and 3 bathrooms. Sale prices within these categories range widely, though many remain below \$600,000. Homes with 3 or more bathrooms appear less frequently but include a larger number of higher-priced properties. This graph indicates a generally positive relationship between the number of bathrooms and sale price, where homes with more bathrooms tend to be associated with higher prices. However, properties with very high bathroom counts appear much less frequently in the dataset. Because these observations are relatively rare, the pattern among the higher bathroom categories shows a slight decreasing trend.
+
+### 4. price vs spatial features
+
+```{R price vs spatial features}
+
+# 1) join census variables to each sale point (income + no vehicle)
+opa_plot <- st_join(
+  opa_sf,
+  phl_tracts[, c("median_income", "pct_no_vehicle")]
+)
+
+# 2) create spatial distance features (meters)
+# distance to nearest park
+idx_park <- st_nearest_feature(opa_plot, parks_clean)
+opa_plot$dist_park <- as.numeric(st_distance(opa_plot, parks_clean[idx_park, ], by_element = TRUE))
+
+# distance to nearest SEPTA stop
+idx_stop <- st_nearest_feature(opa_plot, septa_clean)
+opa_plot$dist_septa <- as.numeric(st_distance(opa_plot, septa_clean[idx_stop, ], by_element = TRUE))
+
+# (optional) drop geometry for faster plotting
+opa_plot_df <- opa_plot %>% st_drop_geometry()
+
+
+# Plot 1: Price vs Median Income
+p_income <- ggplot(opa_plot_df, aes(x = median_income, y = sale_price)) +
+  geom_point(alpha = 0.22, size = 0.7, color = "#1f77b4") +
+  scale_x_continuous(labels = dollar) +
+  scale_y_continuous(labels = dollar) +
+  labs(title = "Price vs Median Income",
+       x = "Median Household Income (USD)",
+       y = "Sale Price (USD)") +
+  base_theme
+
+# Plot 2: Price vs % No Vehicle
+p_vehicle <- ggplot(opa_plot_df, aes(x = pct_no_vehicle, y = sale_price)) +
+  geom_point(alpha = 0.22, size = 0.7, color = "#2ca02c") +
+  scale_y_continuous(labels = dollar) +
+  labs(title = "Price vs % Households Without Vehicle",
+       x = "% No Vehicle (ACS)",
+       y = "Sale Price (USD)") +
+  base_theme
+
+# Plot 3: Price vs Distance to Park
+p_park <- ggplot(opa_plot_df, aes(x = dist_park, y = sale_price)) +
+  geom_point(alpha = 0.22, size = 0.7, color = "#9467bd") +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = dollar) +
+  labs(title = "Price vs Distance to Nearest Park",
+       x = "Distance to Park (meters)",
+       y = "Sale Price (USD)") +
+  base_theme
+
+# Plot 4: Price vs Distance to SEPTA Stop
+p_transit <- ggplot(opa_plot_df, aes(x = dist_septa, y = sale_price)) +
+  geom_point(alpha = 0.22, size = 0.7, color = "#17becf") +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = dollar) +
+  labs(title = "Price vs Distance to Nearest SEPTA Stop",
+       x = "Distance to Transit Stop (meters)",
+       y = "Sale Price (USD)") +
+  base_theme
+
+# 3) combine into one 2x2 figure
+(p_income | p_vehicle) / (p_park | p_transit)
+```
+
+**Interpretation:**
+
+1.  The **Price vs Median Income** scatterplot shows the distribution of sale prices across neighborhoods with different median household income levels. Most properties are located in areas where the median household income ranges between \$30,000 and \$120,000. Sale prices within these income levels vary widely, although many properties remain below \$600,000. Higher income areas include a larger number of higher-priced homes, including several properties above \$1,000,000. This graph indicates a generally positive relationship between neighborhood income level and housing price, where homes in higher income areas tend to have higher sale prices.
+
+2.  The **Price vs % Households With No Vehicle** scatterplot shows the distribution of sale prices across areas with different levels of car ownership. Most properties are located in areas where between 10% and 60% of households do not own a vehicle. Sale prices within these areas vary widely, though many remain below \$600,000. Areas with very high percentages of households without vehicles appear less frequently in the dataset. The overall pattern suggests that homes are distributed across a wide range of transportation conditions, with sale prices varying across different levels of vehicle ownership.
+
+3.  The **Price vs Distance to Nearest Park** scatterplot shows the distribution of sale prices at different distances from parks. Most properties are located within approximately 0 to 600 meters of a park. Sale prices within this distance range vary widely, although many homes fall below \$500,000. Properties located very far from parks appear less frequently in the dataset. This graph indicates a negative relationship between distance to parks and housing price, where homes closer to parks tend to be associated with higher sale prices.
+
+4.  The **Price vs Distance to Nearest Transit Stop** scatterplot shows the distribution of sale prices across different distances from public transit stops. Most homes are located within approximately 0 to 500 meters of a transit stop. Sale prices within this distance range vary widely, though many remain below \$600,000. Properties located farther from transit stops appear less frequently. This graph indicates a negative relationship between distance to transit and housing price, where homes closer to transit access tend to be associated with higher prices.
+
+### 5. Creative plot
+
+```{r creative visual}
+# -----------------------------
+# 1. make sure property data is sf and projected
+# -----------------------------
+opa_pts <- opa_clean %>%
+  st_as_sf() %>% 
+  st_transform(PHL_EPSG)
+
+# -----------------------------
+# 2. build Philadelphia boundary from census tracts
+# -----------------------------
+phl_boundary <- phl_tracts %>%
+  summarise() %>%
+  st_make_valid()
+
+# -----------------------------
+# 3. create fishnet
+# you can try 800, 1000, or 1200 meters
+# -----------------------------
+cell_size <- 1000
+
+fishnet <- st_make_grid(
+  phl_boundary,
+  cellsize = cell_size,
+  square = TRUE
+) %>%
+  st_as_sf() %>%
+  st_intersection(phl_boundary) %>%
+  mutate(grid_id = row_number())
+
+# -----------------------------
+# 4. spatial join properties to fishnet
+# -----------------------------
+grid_sales <- fishnet %>%
+  st_join(opa_pts, join = st_intersects)
+
+# -----------------------------
+# 5. aggregate sale prices by grid
+# use median price + count
+# -----------------------------
+grid_summary <- grid_sales %>%
+  st_drop_geometry() %>%
+  group_by(grid_id) %>%
+  summarise(
+    n_sales = n(),
+    med_price = median(sale_price, na.rm = TRUE),
+    mean_price = mean(sale_price, na.rm = TRUE)
+  )
+
+fishnet_price <- fishnet %>%
+  left_join(grid_summary, by = "grid_id") %>%
+  mutate(
+    n_sales = replace_na(n_sales, 0)
+  )
+
+# keep only cells with enough observations
+# usually >= 5 is safer
+fishnet_valid <- fishnet_price %>%
+  filter(n_sales >= 5, !is.na(med_price))
+
+# -----------------------------
+# 6. create spatial neighbors and weights
+# -----------------------------
+nb <- st_contiguity(fishnet_valid)
+wts <- st_weights(nb)
+
+fishnet_valid <- fishnet_valid %>%
+  mutate(
+    nb = nb,
+    wts = wts
+  )
+
+# -----------------------------
+# 7. local Moran's I
+# -----------------------------
+fishnet_valid <- fishnet_valid %>%
+  mutate(local_moran = local_moran(med_price, nb, wts)) %>%
+  tidyr::unnest(local_moran)
+
+# -----------------------------
+# 8. spatial lag and quadrant classification
+# -----------------------------
+
+listw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+# spatial lag
+fishnet_valid$lag_price <- lag.listw(
+  listw,
+  fishnet_valid$med_price,
+  zero.policy = TRUE
+)
+
+fishnet_valid <- fishnet_valid %>%
+  mutate(
+    price_std = as.numeric(scale(med_price)),
+    lag_std   = as.numeric(scale(lag_price)),
+    lisa_cat = case_when(
+      p_ii <= 0.05 & price_std >= 0 & lag_std >= 0 ~ "HH",
+      p_ii <= 0.05 & price_std <= 0 & lag_std <= 0 ~ "LL",
+      p_ii <= 0.05 & price_std >= 0 & lag_std <= 0 ~ "HL",
+      p_ii <= 0.05 & price_std <= 0 & lag_std >= 0 ~ "LH",
+      TRUE ~ "Not significant"
+    )
+  )
+
+neigh_url <- "https://raw.githubusercontent.com/opendataphilly/open-geo-data/refs/heads/master/philadelphia-neighborhoods/philadelphia-neighborhoods.geojson"
+neigh <- read_sf(neigh_url) %>%
+  st_transform(PHL_EPSG)
+
+# color palette
+lisa_cols <- c(
+  "HH" = "#d73027",              # hot spot
+  "LL" = "#4575b4",              # cold spot
+  "HL" = "#f46d43",              # high surrounded by low
+  "LH" = "#74add1",              # low surrounded by high
+  "Not significant" = "grey90"
+)
+
+ggplot() +
+  geom_sf(data = phl_boundary, fill = "grey98", color = NA) +
+  geom_sf(
+    data = fishnet_valid,
+    aes(fill = lisa_cat),
+    color = "white",
+    linewidth = 0.12
+  ) +
+  geom_sf(
+    data = neigh,
+    fill = NA,
+    color = alpha("grey30", 0.35),
+    linewidth = 0.18
+  ) +
+  scale_fill_manual(
+    values = lisa_cols,
+    drop = FALSE,
+    name = "LISA cluster"
+  ) +
+  labs(
+    title = "Philadelphia Housing Price Clusters",
+    subtitle = "Fishnet-based Local Moran's I classification of median sale price (2023–2024)",
+    caption = "HH = high-high, LL = low-low, HL = high-low, LH = low-high | cells with fewer than 5 sales excluded"
+  ) +
+  theme_void(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey30", hjust = 0),
+    plot.caption = element_text(size = 7, color = "grey40"),
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    panel.background = element_rect(fill = "#f8f8f8", color = NA),
+    plot.background = element_rect(fill = "#f8f8f8", color = NA)
+  )
+
+```
+
+**Interpretation:**
+
+The LISA map shows the spatial clustering of median housing sale prices across Philadelphia using a fishnet grid and Local Moran’s I analysis. Each grid cell represents the median sale price of properties within that area, and only cells containing at least five transactions were included to ensure statistical reliability. Red cells represent High–High clusters, where areas with high housing prices are surrounded by neighboring areas that also have high prices. These clusters appear mainly in Center City and parts of Northwest Philadelphia. Dark blue cells represent Low–Low clusters, where areas with lower housing prices are surrounded by other low-priced areas. These clusters are primarily in North Philadelphia. Light blue cells represent Low–High outliers, which are lower-priced areas located near higher-priced neighborhoods. It is at the periphery of Center City. Grey cells indicate locations where the spatial pattern of housing prices is not statistically significant. Overall, the map shows that housing prices in Philadelphia exhibit clear spatial clustering.
+
+## Feature Engineering
+
+Several spatial variables were constructed to capture neighborhood conditions and accessibility that may influence housing prices.
+
+```{r crime buffer 400m}
+#Number of crime incidents within 400m of each property
+crime_buffer <- st_buffer(opa_sf, 400)
+
+crime_count <- lengths(
+  st_intersects(crime_buffer, crime_clean)
+)
+
+opa_sf$crime_400m <- crime_count
+
+summary(opa_sf$crime_400m)
+```
+
+Crime exposure was measured using police incident data from 2023 and 2024. For each property, the number of reported crime incidents occurring within a 400-meter buffer was calculated. This buffer represents the immediate walkable neighborhood environment surrounding the property and captures local safety conditions that may affect housing demand.
+
+```{r KNN distance to 3 nearest parks}
+k <- 3
+
+park_dist_matrix <- st_distance(opa_sf, parks_clean)
+
+park_dist_matrix <- as.matrix(park_dist_matrix)
+
+opa_sf$knn_park_dist <- apply(park_dist_matrix, 1, function(x){
+  mean(sort(x)[1:k])
+})
+
+summary(opa_sf$knn_park_dist)
+```
+
+Access to green space was measured using a K-Nearest Neighbor (KNN) approach with k = 3, calculating the distance from each property to the three nearest major parks. This variable captures the availability of nearby recreational and environmental amenities.
+
+```{r KNN Distance to 3 Nearest Schools}
+
+school_dist_matrix <- st_distance(opa_sf, schools_clean)
+
+school_dist_matrix <- as.matrix(school_dist_matrix)
+
+k <- 3
+
+opa_sf$knn_school_dist <- apply(
+  school_dist_matrix,
+  1,
+  function(x, k) {
+    mean(sort(x)[1:k])
+  },
+  k = k
+)
+summary(opa_sf$knn_school_dist)
+```
+
+Accessibility to essential services was also considered. School accessibility was measured using a KNN method that calculates the distance to the three nearest schools.
+
+```{r euclidian distance to nearest SEPTA stop}
+
+# nearest SEPTA stop for each property
+nearest_stop <- st_nearest_feature(opa_sf, septa_clean)
+
+# distance (meters)
+opa_sf$dist_septa <- as.numeric(
+  st_distance(
+    opa_sf,
+    septa_clean[nearest_stop, ],
+    by_element = TRUE
+  )
+)
+summary(opa_sf$dist_septa)
+```
+
+```{r interaction features: Transit access × Car ownership}
+
+#closer to transit+people access to 0 vehicle more= higher transit_x_no_vehicle value
+opa_sf <- st_join(
+  opa_sf,
+  phl_tracts[, c("median_income", "pct_no_vehicle")]
+)
+
+# Define transit access index from distance to SEPTA
+opa_sf$transit_access <- 1 / (opa_sf$dist_septa + 1)
+
+# Transit access × Car ownership (proxy: % households with no vehicle)
+opa_sf$transit_x_no_vehicle <- opa_sf$transit_access * opa_sf$pct_no_vehicle
+
+summary(opa_sf$pct_no_vehicle)
+summary(opa_sf$transit_x_no_vehicle)
+```
+
+```{r}
+tracts_sf <- st_read(here("data", "Census_tracts_2010 (1).geojson"))
+tracts_sf <- st_transform(tracts_sf, st_crs(opa_sf))
+opa_sf <- st_join(opa_sf, tracts_sf["GEOID10"])
+```
+
+Transit accessibility was represented by calculating the Euclidean distance from each property to the nearest transit stop. Shorter distances indicate better access to public transportation, which can increase the convenience and desirability of a property. The interactive feature of transit accessibility and car ownership is calculated.
+
+```{r Vacant Properties within 300m}
+# create 300m buffer around each property
+vacant_buffer <- st_buffer(opa_sf, 300)
+
+# count vacant properties within buffer
+vacant_count <- lengths(
+  st_intersects(vacant_buffer, vacant_clean)
+)
+
+# add feature to datasets
+opa_sf$vacant_300m <- vacant_count
+
+summary(opa_sf$vacant_300m)
+```
+
+Finally, neighborhood physical conditions were represented by calculating the number of vacant properties within a 300-meter buffer around each home using the city’s vacant property dataset. Higher concentrations of vacant properties may indicate neighborhood disinvestment and can negatively influence surrounding property values.
+
+## Model building
+```{r set models for training}
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# 1) modeling table (drop geometry)
+model_df <- opa_sf %>% st_drop_geometry()
+
+# 2) full set of variables used across ALL models
+full_cols <- c(
+  "sale_price",
+  "total_livable_area","number_of_bedrooms","number_of_bathrooms","year_built","market_value","fireplaces","crime_400m","knn_school_dist","knn_park_dist","dist_septa","vacant_300m","garage_spaces","interior_condition","census_tract","exterior_condition","median_income","pct_no_vehicle","transit_x_no_vehicle"
+)
+pa_tracts <- tracts(state = "PA", year = 2023)
+
+philly_tracts <- pa_tracts %>%
+  filter(COUNTYFP == "101")
+
+philly_tracts <- st_transform(philly_tracts, st_crs(opa_sf))
+
+opa_sf <- st_join(opa_sf, philly_tracts["GEOID"])
+
+# 3) keep only these columns + drop NA once
+model_df <- model_df %>%
+  select(all_of(full_cols)) %>%
+  filter(complete.cases(.))
+
+#Create age
+model_df$year_built <- as.numeric(model_df$year_built)
+model_df <- model_df %>%
+  mutate(
+    age = 2024 - year_built
+  )
+model_df <- model_df %>%
+  mutate(
+    age_sq = age^2
+  )
+
+opa_sf <- opa_sf %>%
+  mutate(age = 2024 - as.numeric(year_built))
+
+# --- Center City point (City Hall) ---
+center_city <- st_sfc(st_point(c(-75.1636, 39.9526)), crs = 4326)
+
+# Make CRS match opa_sf (so distance is in meters/feet depending on your CRS)
+center_city <- st_transform(center_city, st_crs(opa_sf))
+
+# --- Distance to Center City (for each property) ---
+opa_sf$dist_center <- as.numeric(st_distance(opa_sf, center_city))
+
+# Squared distance term (non-linear)
+opa_sf$dist_center_sq <- opa_sf$dist_center^2
+
+# Rebuild model_df including the new variables
+model_df <- opa_sf %>%
+  st_drop_geometry() %>%
+  select(
+    sale_price,
+    total_livable_area, number_of_bedrooms, number_of_bathrooms, year_built,
+    crime_400m, knn_school_dist, knn_park_dist, dist_septa,     vacant_300m,garage_spaces,fireplaces,interior_condition,age,census_tract,
+    median_income, pct_no_vehicle,
+    dist_center, dist_center_sq
+  ) %>%
+  filter(complete.cases(.))
+
+# calculate cutoffs
+lower_cut <- quantile(model_df$sale_price, 0.01, na.rm = TRUE)
+upper_cut <- quantile(model_df$sale_price, 0.99, na.rm = TRUE)
+
+# remove top 5% and bottom 5%
+model_df <- model_df %>%
+  filter(sale_price >= lower_cut,
+         sale_price <= upper_cut)
+
+#final data cleaning
+model_df <- model_df %>%
+  filter(complete.cases(.))
+# optional: quick check
+nrow(model_df)
+```
+To prepare the data for model estimation, the spatial geometry was first removed from the property dataset so that the remaining file could be used as a standard tabular dataset for regression analysis. Only variables relevant to the modeling process were retained, including the dependent variable and selected explanatory variables used across the candidate model specifications. Observations with missing values were then removed to avoid inconsistencies in estimation and to ensure that all models were fitted on the same set of observations. This step is important because allowing different models to use different sample sizes can make performance comparisons less reliable. After cleaning and filtering, the final modeling dataset contains 18,485 residential property sales, providing a large and consistent sample for model estimation and validation.
+```{r}
+p1  <- quantile(model_df$sale_price, 0.01, na.rm = TRUE)
+p99 <- quantile(model_df$sale_price, 0.99, na.rm = TRUE)
+
+ggplot(model_df, aes(x = sale_price)) +
+  geom_histogram(bins = 80, fill = "lightblue", color = "white") +
+  
+  geom_vline(xintercept = p1, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = p99, color = "red", linetype = "dashed", linewidth = 1) +
+  
+  
+  labs(
+    title = "Distribution of Philadelphia Home Sale Prices",
+    subtitle = "Red dashed lines indicate bottom and top 1% of sales",
+    x = "Sale Price (USD)",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(labels = scales::dollar) +
+  theme_minimal()
+```
+The distribution of home sale prices is right-skewed, with a small number of extremely high-value properties extending the upper tail of the distribution. These extreme observations can disproportionately influence regression estimates and reduce model stability. To reduce the impact of these outliers, observations below the 1st percentile and above the 99th percentile of sale prices were removed. This trimming removes extreme market anomalies while retaining the vast majority of typical housing transactions.Although this approach excludes a portion of observations and therefore does not represent the full range of market outcomes, but it improves model stability and allows the regression to better capture the relationships present in the typical housing market.
+
+```{r}
+vif_check <- lm(
+  sale_price ~     total_livable_area + 
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    crime_400m +                  #Spatial
+    knn_school_dist +             #Spatial
+    knn_park_dist +               #Spatial
+    dist_septa +                  #Spatial
+    vacant_300m +                 #Spatial
+    median_income +               #Census variables
+    pct_no_vehicle +              #Census variables
+    dist_center ,                 #Spatial(non-linear)
+  data = model_df
+)
+
+vif(vif_check)
+```
+
+The variance inflation factor (VIF) results suggest that multicollinearity is not a major concern in this model. All variables have relatively low VIF values, with the highest values remaining well below commonly used thresholds of concern such as 5 or 10. Most predictors fall close to 1 to 3, indicating that the explanatory variables are not overly redundant with one another. This means that the model is able to estimate the independent effect of each variable without serious distortion caused by strong linear relationships among predictors.
+
+```{r model 1}
+# Model 1: Structural
+m1 <- lm(
+  sale_price ~
+    total_livable_area +
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    age + I(age^2) ,
+  data = model_df
+)
+
+summary(m1)
+```
+
+For the first model, a baseline structural hedonic regression was estimated using only property-level housing characteristics. The model predicts residential sale price as a function of total livable area, number of bedrooms, number of bathrooms, garage spaces, fireplaces, interior condition, and housing age. A quadratic term for age, age², was also included to capture a possible non-linear relationship between property age and sale price, since the effect of age may not be constant across all homes. This first specification was designed to measure how much variation in sale price can be explained by the physical and structural features of the house alone, before adding neighborhood, accessibility, or other spatial variables.
+
+```{r model 2}
+# Model 2: + Spatial + Socioeconomic
+m2 <- lm(
+  sale_price ~
+    total_livable_area + 
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    age + I(age^2) +
+    crime_400m +                  #Spatial
+    knn_school_dist +             #Spatial
+    knn_park_dist +               #Spatial
+    dist_septa +                  #Spatial
+    vacant_300m +                 #Spatial
+    median_income +               #Census variables
+    pct_no_vehicle,               #Census variables
+  data = model_df
+)
+
+summary(m2)
+```
+
+For the second model, the model was expanded by adding neighborhood and location-based variables. In addition to the housing characteristics included in Model 1, this specification incorporates spatial accessibility measures and socioeconomic context variables. The added spatial variables include crime within 400 meters, distance to the nearest school, distance to the nearest park, distance to the nearest SEPTA access point, and nearby vacancy within 300 meters. Two census-based neighborhood variables, median income and the share of households without a vehicle, were also included. This second model was designed to test whether sale prices can be better explained when both property characteristics and surrounding neighborhood conditions are considered together.
+
+```{r model 3}
+# Model 3: + Non-linear term
+m3 <- lm(
+  sale_price ~
+    total_livable_area + 
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    age + I(age^2) +
+    crime_400m +                  #Spatial
+    knn_school_dist +             #Spatial
+    knn_park_dist +               #Spatial
+    dist_septa +                  #Spatial
+    vacant_300m +                 #Spatial
+    median_income +               #Census variables
+    pct_no_vehicle +              #Census variables
+    dist_center +                 #Spatial(non-linear)
+    dist_center_sq ,              #Spatial(non-linear)
+  data = model_df
+)
+
+summary(m3)
+```
+
+For the third model, the second specification was further expanded by adding a non-linear location effect related to distance from Center City. In addition to the structural, spatial, and socioeconomic variables already included in Model 2, this model adds both dist_center and its squared term, dist_center_sq, to capture a curved rather than strictly linear relationship between centrality and housing prices. This allows the model to reflect the possibility that the effect of distance to the city center changes across space, rather than increasing or decreasing at a constant rate. The purpose of Model 3 was to test whether incorporating this non-linear spatial pattern could improve the model’s ability to explain variation in residential sale prices.
+
+```{r model 4}
+#Model 4: Interaction
+m4 <- lm(
+  sale_price ~
+    total_livable_area + 
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    age + I(age^2) +
+    crime_400m +                  #Spatial
+    knn_school_dist +             #Spatial
+    knn_park_dist +               #Spatial
+    dist_septa +                  #Spatial
+    vacant_300m +                 #Spatial
+    median_income +               #Census variables
+    pct_no_vehicle +              #Census variables
+    dist_center +                 #Spatial(non-linear)
+    dist_center_sq +              #Spatial(non-linear)
+    dist_septa * pct_no_vehicle,  #Interaction
+  data = model_df
+)
+
+summary(m4)
+```
+
+For the fourth model, the third specification was extended by adding an interaction term between distance to SEPTA and the share of households without a vehicle.The added interaction term, dist_septa * pct_no_vehicle, was included to test whether the effect of transit accessibility on housing prices varies depending on neighborhood car access. In other words, this model allows the value of being closer to SEPTA to differ across areas where more households may rely more heavily on public transportation. The purpose of Model 4 was to capture this conditional relationship and assess whether introducing an interaction between transit access and neighborhood socioeconomic conditions improves model performance.
+
+```{r model 5}
+#Model 5: Fixed Effect
+m5 <- lm(
+  sale_price ~
+    total_livable_area + 
+    number_of_bedrooms +
+    number_of_bathrooms +
+    garage_spaces +
+    fireplaces +
+    interior_condition +
+    age + I(age^2) +
+    crime_400m +                  #Spatial
+    knn_school_dist +             #Spatial
+    knn_park_dist +               #Spatial
+    dist_septa +                  #Spatial
+    vacant_300m +                 #Spatial
+    median_income +               #Census variables
+    pct_no_vehicle +              #Census variables
+    dist_center +                 #Spatial(non-linear)
+    dist_center_sq +              #Spatial(non-linear)
+    dist_septa * pct_no_vehicle + #Interaction
+    as.factor(census_tract),      #Fixed Effect
+  data = model_df
+)
+
+summary(m5)
+```
+
+For the fifth and final model, the fourth specification was further extended by adding census tract fixed effects through as.factor(census_tract). This final model retains all previously included structural, spatial, socioeconomic, non-linear, and interaction terms, while also controlling for unobserved tract-level characteristics that may systematically influence housing prices. By including a separate fixed effect for each census tract, the model accounts for localized neighborhood factors that are not directly measured by the other variables, such as tract-specific housing market conditions, built environment context, or other place-based influences. This final specification was intended to capture both property-level variation and broader neighborhood-level differences more completely. Among all five models, Model 5 produced the highest R².
+
+## Diagnostic plots
+
+```{r}
+#10-fold CV
+set.seed(123)
+
+train_control <- trainControl(
+  method = "cv",
+  number = 10
+)
+
+cv_m1 <- train(
+  sale_price ~ total_livable_area + number_of_bedrooms + number_of_bathrooms + garage_spaces + fireplaces + interior_condition + age + I(age^2),
+  data = model_df, method = "lm", trControl = train_control
+)
+
+cv_m2 <- train(
+  sale_price ~ total_livable_area + number_of_bedrooms + number_of_bathrooms + garage_spaces + fireplaces + interior_condition + age + I(age^2) + crime_400m + knn_school_dist + knn_park_dist + dist_septa + vacant_300m + median_income + pct_no_vehicle,
+  data = model_df, method = "lm", trControl = train_control
+)
+
+cv_m3 <- train(
+  sale_price ~ total_livable_area + number_of_bedrooms + number_of_bathrooms + garage_spaces + fireplaces + interior_condition + age + I(age^2) + crime_400m + knn_school_dist + knn_park_dist + dist_septa + vacant_300m + median_income + pct_no_vehicle + dist_center + dist_center_sq ,
+  data = model_df, method = "lm", trControl = train_control
+)
+
+cv_m4 <- train(
+  sale_price ~ total_livable_area + number_of_bedrooms + number_of_bathrooms + garage_spaces + fireplaces + interior_condition + age + I(age^2) + crime_400m + knn_school_dist + knn_park_dist + dist_septa + vacant_300m + median_income + pct_no_vehicle + dist_center + dist_center_sq + dist_septa * pct_no_vehicle,
+  data = model_df, method = "lm", trControl = train_control
+)
+
+cv_m5 <- train(
+  sale_price ~ total_livable_area + number_of_bedrooms + number_of_bathrooms + garage_spaces + fireplaces + interior_condition + age + I(age^2) + crime_400m + knn_school_dist + knn_park_dist + dist_septa + vacant_300m + median_income + pct_no_vehicle + dist_center + dist_center_sq + dist_septa * pct_no_vehicle + as.factor(census_tract),
+  data = model_df, method = "lm", trControl = train_control
+)
+
+model_compare <- data.frame(
+  Model = c(
+    "Structural",
+    "Spatial + Socioeconomic",
+    "Non-linear term",
+    "Interaction",
+    "Fixed Effect"
+  ),
+  Rsquared = c(
+    cv_m1$results$Rsquared,
+    cv_m2$results$Rsquared,
+    cv_m3$results$Rsquared,
+    cv_m4$results$Rsquared,
+    cv_m5$results$Rsquared
+  ),
+  RMSE = c(
+    cv_m1$results$RMSE,
+    cv_m2$results$RMSE,
+    cv_m3$results$RMSE,
+    cv_m4$results$RMSE,
+    cv_m5$results$RMSE
+  ),
+  MAE = c(
+    cv_m1$results$MAE,
+    cv_m2$results$MAE,
+    cv_m3$results$MAE,
+    cv_m4$results$MAE,
+    cv_m5$results$MAE
+  )
+) |>
+  mutate(
+    R2 = round(Rsquared, 3),
+    RMSE = round(RMSE, 0),
+    MAE = round(MAE, 0)
+  ) |>
+  select(
+    Model,
+    `R² (CV)` = R2,
+    `RMSE (CV)` = RMSE,
+    `MAE (CV)` = MAE
+  )
+
+model_compare
+```
+
+The 10-fold cross-validation results show that the Fixed Effect model performed best among all five specifications. It achieved the highest cross-validated R² (0.771), meaning it explained about 77.1% of the variation in sale prices in out-of-sample prediction. It also produced the lowest RMSE (97,498) and the lowest MAE (57,277), indicating that its prediction errors were smaller on average than those of the other models. Compared with the earlier models, predictive performance improved steadily as additional complexity was introduced, with especially noticeable gains after adding spatial and socioeconomic variables and then neighborhood fixed effects. Although the non-linear and interaction models slightly improved performance over the simpler specifications, the Fixed Effect model provided the strongest overall generalization, suggesting that neighborhood-level differences play an important role in explaining housing prices. For that reason, the fifth model with Fixed Effect was selected as the final model.
+
+```{r}
+# Residual Plot
+model_df$residuals <- residuals(m5)
+model_df$fitted <- fitted(m5)
+
+ggplot(model_df, aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.4, size = 1.2) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residual Plot",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+The residuals are generally centered around zero and appear to be fairly randomly scattered, without a clear curved pattern. This suggests that the model is not missing a major systematic relationship.
+
+```{r}
+# Breusch-Pagan Test for Heteroskedasticity
+
+bp_test <- bptest(m5)
+bp_test
+```
+The Breusch–Pagan test indicates strong evidence of heteroskedasticity in the final model, meaning the variance of the residuals is not constant across fitted values. This pattern is also visible in the residual plot, where the spread of residuals changes over the range of predicted sale prices and becomes less stable for higher-value properties. Even so, the fixed effect model remains the preferred specification for prediction because it performed best in cross-validation. However, to make statistical inference more reliable, the model should be reported with standard errors adjusted for heteroskedasticity.
+```{r}
+# Q-Q Plot for Normality of Residuals
+
+
+qq_df <- data.frame(residuals = residuals(m5))
+
+ggplot(qq_df, aes(sample = residuals)) +
+  stat_qq(alpha = 0.5) +
+  stat_qq_line(color = "red", linewidth = 1) +
+  labs(
+    title = "Q-Q Plot of Residuals"
+  ) +
+  theme_minimal()
+```
+The Q-Q plot shows substantial deviation from the reference line, especially in the upper tail, indicating that the residuals are not normally distributed. While observations near the center of the distribution lie relatively close to the reference line, both tails diverge noticeably, with the upper tail showing especially strong upward curvature. This suggests that the residual distribution is right-skewed and contains substantial outliers, particularly among observations with large positive residuals. In practical terms, the model fits the bulk of observations more closely than the extreme cases, where underprediction appears to be more pronounced.
+```{r}
+#Cook's Distance
+
+# Add diagnostic measures to tibble
+diagnostic_data <- augment(m5, data = model_df) |>
+  mutate(
+    cooks_d = .cooksd,
+    leverage = .hat,
+    is_influential = cooks_d > 4 / nrow(model_df)
+  )
+
+# Plot Cook's Distance
+ggplot(diagnostic_data, aes(x = 1:nrow(diagnostic_data), y = cooks_d)) +
+  geom_point(aes(color = is_influential), size = 2) +
+  geom_hline(
+    yintercept = 4 / nrow(diagnostic_data),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  scale_color_manual(values = c("grey60", "red")) +
+  labs(
+    title = "Cook's Distance",
+    x = "Observation",
+    y = "Cook's D"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+Most observations have very small Cook’s Distance values, suggesting that they do not strongly influence the fitted model. However, a small number of points stand out with noticeably higher Cook’s D values, indicating that a few observations may have a relatively strong influence on the regression results.
+
+## Conclusion & Interpretations
+
+Final model’s accuracy:
+Model 5 is the final and preferred model for prediction because it performs best among all five specifications. Its stronger performance suggests that location and tract-level differences are highly important in explaining variation in residential sale prices. At the same time, the diagnostic results indicate the presence of heteroskedasticity, non-normal residuals, and a small number of influential observations. As a result, while Model 5 provides the strongest overall predictive accuracy, its coefficient estimates should be interpreted carefully.
+
+Which features matter most for Philadelphia prices:
+Neighborhood and census tract effects appear to matter most for Philadelphia housing prices, as model performance improved substantially after tract-level fixed effects were added. This suggests that local context plays a major role in shaping sale prices beyond the structural features of individual homes. In other words, where a property is located is highly influential, and tract-level differences capture important neighborhood conditions that are not fully explained by the other variables in the model.
+
+Hardest neighborhood to predict:
+```{r}
+options(scipen = 999)
+# 1 Add Model 5 residuals back to model_df
+
+model_resid <- model_df %>%
+  mutate(resid = resid(m5))
+
+#2
+tract_resid1 <- model_resid %>%
+  group_by(census_tract) %>%   # <-- my tract column in model_df
+  summarise(mean_resid = mean(resid, na.rm = TRUE))
+
+#2.5 standardlize the mean residual
+tract_resid1 <- tract_resid1 %>%
+  mutate(sd_mean_resid = scale(mean_resid))
+
+#3 Join to tract_sf
+tract_sf_resid <- tracts_sf %>%
+  left_join(tract_resid1, by = c("NAME10" = "census_tract"))
+
+```
+
+```{r}
+
+# choose number of classes
+n_class <- 7
+
+# make Jenks / natural breaks
+brks <- classIntervals(
+  tract_sf_resid$sd_mean_resid,
+  n = n_class,
+  style = "jenks"
+)$brks
+
+# create pretty labels
+labs_q <- paste0(
+  round(head(brks, -1), 2),
+  " to ",
+  round(tail(brks, -1), 2)
+)
+
+# cut into classes
+tract_sf_resid <- tract_sf_resid %>%
+  mutate(
+    q_resid = cut(
+      sd_mean_resid,
+      breaks = brks,
+      include.lowest = TRUE,
+      labels = labs_q
+    )
+  )
+
+# filter highlighted tract
+tract1 <- tract_sf_resid %>%
+  filter(NAME10 == "1")
+
+# map
+ggplot(tract_sf_resid) +
+  geom_sf(aes(fill = q_resid), color = "grey75", linewidth = 0.2) +
+  geom_sf(data = tract1, fill = NA, color = "yellow", linewidth = 0.8) +
+  scale_fill_brewer(
+    palette = "RdBu",
+    direction = -1,
+    na.value = "grey85",
+    name = "Std. mean residual"
+  ) +
+  labs(
+    title = "Mean Residuals by Census Tract",
+    subtitle = "Blue tracts indicate underprediction; red tracts indicate overprediction"
+  ) +
+  theme_void()
+```
+Census Tract 1 (highlighted in yellow) appears to be the hardest neighborhood to predict, as it has the largest residual in the final model. This indicates that sale prices in this tract are not being captured as accurately as in other parts of the city, suggesting that important local factors may still be missing from the model. Philadelphia Census Tract 1 is located in the Old City/Society Hill area. Its large residual may reflect unique neighborhood characteristics, historic housing stock, or localized market dynamics that are not fully explained by the included variables.
+
+Equity concerns:
+One key equity concern is that a housing value model may reproduce existing neighborhood inequality rather than measure value in a neutral way. In Philadelphia, sale prices are shaped not only by housing characteristics, but also by long histories of segregation, disinvestment, and uneven public investment. As a result, the model may learn and reinforce patterns that already disadvantage certain neighborhoods. Another concern is that prediction errors may not be evenly distributed across space. If the model performs worse in some neighborhoods than others, those areas may be treated less fairly in assessment or policy decisions. In addition, some variables may act as indirect proxies for race, class, or neighborhood disadvantage, even if those characteristics are not directly included. This means a model can be statistically accurate overall while still raising important fairness concerns.
+
+
+Limitations:
+This analysis has several important limitations. First, the model was estimated using observed sale prices, which reflect not only housing characteristics and location, but also broader market conditions and long-standing structural inequalities. As a result, the model predicts how the market values properties, not necessarily their intrinsic or socially fair value. Second, some extreme sale price outliers were removed to improve model stability and predictive accuracy. While this helps reduce the influence of unusual observations, it also means the model may be less able to represent the full range of the housing market, especially very high-value or highly atypical properties. In other words, trimming outliers improves performance for the majority of observations but may reduce accuracy at the extremes. A further limitation is that the model may still omit important variables that influence housing values, such as detailed housing renovations, school perception, or block-level amenities that are difficult to measure. In addition, the diagnostic results show evidence of heteroskedasticity, non-normal residuals, and a small number of influential observations. This suggests that model errors are not perfectly well behaved, and coefficient estimates should therefore be interpreted with caution. Finally, although census tract fixed effects improved the model’s predictive accuracy, they mainly capture neighborhood differences rather than explain exactly what causes them. This improves model fit, but it also makes the results harder to interpret and may hide deeper structural inequalities across neighborhoods. In the future,the findings would benefit from further examination using additional variables, alternative model forms, and more detailed neighborhood-level analysis.
+
+
+
+
+Portions of the written text in this report were assisted by ChatGPT for grammatical correction, stylistic refinement, and clarity of expression. ChatGPT was also used to help identify coding errors and improve code readability. All analytical decisions, model construction, statistical interpretation, and final conclusions were determined and approved by the author.
