@@ -37,3 +37,6 @@ Thumbs.db
 *.tmp
 *~
 /.quarto/
+data/opa_properties_public.geojson
+.Rhistory
+.RData
