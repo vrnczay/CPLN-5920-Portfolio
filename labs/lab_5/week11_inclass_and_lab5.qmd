@@ -20,19 +20,49 @@ execute:
 
 # 1. Introduction
 
-This homework extends the Q1 2025 space-time prediction workflow to **Q2 2025 (April–June)**, Philadelphia's spring-to-early-summer transition period. Compared to Q1's cold winter months, Q2 brings warmer temperatures, longer daylight hours, and major shifts in rider behavior — making it an interesting contrast for evaluating how well our models generalize across seasons.
+Philadelphia's Indego bike share system serves a growing number of riders across the city, and accurately predicting station-level demand is essential for effective rebalancing and fleet management. This report applies a space-time panel regression framework to forecast hourly trip counts at each station using Q1 and Q2 2025 trip data. The analysis builds on temporal lag features, weather conditions, demographic context, and engineered seasonal indicators to capture the complex patterns that drive bike share demand.
 
-Q2 also captures several demand-shaping events unique to spring in Philadelphia: the end of university semesters (Penn, Drexel, Temple), increasing recreational riding on weekends, and the onset of outdoor event season. These factors motivate the new features added.
+Q1 2025 covers January through March, a period defined by cold temperatures and low recreational ridership. Q2 2025 covers April through June, when warmer weather, university semester endings, and increased outdoor activity reshape demand. Together, the two quarters offer a meaningful comparison for assessing whether models trained on one season generalize to another.
 
-This analysis follows the same five-model framework introduced in the in-class Q1 walkthrough, with the following additions:
+The workflow follows five OLS regression models of increasing complexity, evaluated using Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and R-squared. A Poisson regression model is also included as an alternative suited to count data. The best-performing baseline model is then extended with three new engineered features specific to Q2 demand patterns. Error analysis examines how model accuracy varies by time of day, day of week, station, and neighborhood demographics. A final reflection considers the equity and operational implications of deploying these models at scale.
 
--   A direct **MAE comparison between Q1 and Q2** to assess seasonal model performance differences
--   Deeper **error analysis** across space, time, and demographic dimensions
--   **Three new engineered features** informed by Q2-specific demand patterns
--   A **Poisson regression** alternative to OLS for count data
--   A **critical reflection** on operational deployment and equity implications
+# 2. Report
 
-# 2. In-Class Q1 Results
+## Study Area and Data
+
+This analysis uses Indego bike share trip records for Q1 2025 (January through March) and Q2 2025 (April through June) in Philadelphia. Station-level census data was joined using tidycensus, drawing on tract-level estimates of median household income, transit commute share, and racial composition. Weather data was fetched hourly from the Iowa Environmental Mesonet API for Philadelphia International Airport (KPHL), capturing temperature, precipitation, and wind speed.
+
+Trip counts were aggregated to the station-hour level, creating a panel dataset where each row represents one station in one hour. Temporal lag features (one hour, three hours, and one day prior) capture autocorrelation in demand. A temporal train-test split was used within each quarter: earlier weeks served as training data and later weeks as the test set.
+
+## Model Performance
+
+Five OLS regression models were evaluated for both quarters. Model complexity increased progressively, beginning with just time-of-day and day-of-week predictors and ending with station fixed effects, weather variables, temporal lags, and demographic controls. Model 4, which combined all predictors except demographic interactions, achieved the best balance of accuracy and generalization, with a Q1 test MAE of approximately 0.69 and a Q2 test MAE of approximately 1.07.
+
+Q2 showed consistently higher errors than Q1 across all models. This reflects greater variability in spring and early summer demand driven by recreational trips, event-related surges, and semester transitions that are harder to capture with general features. The Poisson regression model, implemented using fastglm for computational efficiency, performed comparably to the best OLS model and is better suited to count data in theory.
+
+
+
+## Feature Engineering
+
+Three new features were added to Model 4 for the Q2 analysis. The first is a binary indicator for perfect cycling weather, defined as temperatures between 60 and 75 degrees Fahrenheit with no precipitation. The second captures the university semester end period from late April through mid-May, when student ridership is elevated and then drops sharply. The third flags the Memorial Day holiday period, which shows a distinct recreational demand spike distinct from a normal Monday. Together these features reduced Q2 test MAE from approximately 1.07 to approximately 0.94.
+
+## Error Analysis
+
+Prediction errors were largest during morning and evening commute hours, when demand spikes are steep and brief. Weekend afternoons also showed higher errors, likely due to recreational trips that are less regular than commutes. Geographically, stations near university campuses and Center City had the most underprediction during event-driven surges. Stations in lower-income neighborhoods with limited transit alternatives tended to have smaller absolute errors but also lower overall ridership, suggesting the model may underserve those areas if used for rebalancing decisions.
+
+
+## Reflection
+
+A transit agency deploying this model would need to account for its systematic underprediction at high-demand times and locations. Equity implications are significant because optimizing for global MAE may concentrate rebalancing effort on busy high-income corridors while leaving lower-ridership stations underserved. Future work could explore separate models by station cluster or time-of-day category, or incorporate real-time data feeds to reduce lag in predictions. The model as built provides a useful demand signal but should be paired with human judgment and equity-aware rebalancing policies.
+
+# 3. QMD Link
+
+[GitHub Link to QMD](https://github.com/vrnczay/CPLN-5920-Portfolio/blob/main/labs/lab_5/week11_inclass_and_lab5.qmd)
+
+
+# 4. Technical Appendix
+
+## 4.1 Q1 2025 In-Class Analysis
 
 ```{r setup}
 #| message: false
@@ -101,7 +131,7 @@ census_api_key(Sys.getenv("CENSUS_API_KEY"))
 #census_api_key("yourkeyhere", install=TRUE, overwrite=TRUE)
 ```
 
-## Load and Process Indego Trip Data (Q1 2025)
+### Load and Process Indego Trip Data (Q1 2025)
 
 ```{r load_indego}
 # Read Q1 2025 data
@@ -158,7 +188,7 @@ head(indego %>% select(start_datetime, interval60, week, dotw, hour, weekend))
 
 `interval60` rounds each trip's start timestamp down to the nearest hour using `floor_date()`. For example, a trip that started at 8:47 AM gets assigned to the 8:00 AM bin, and a trip at 8:03 AM also gets assigned to 8:00 AM. This creates a consistent hourly time unit that lets us aggregate all trips happening within the same hour at the same station into a single count, which is the foundation of our space-time panel structure.
 
-### Daily Trip
+#### Daily Trip
 
 ```{r trips_over_time}
 #| message: false
@@ -184,7 +214,7 @@ ggplot(daily_trips, aes(x = date, y = trips)) +
 
 Ridership shows a clear upward trend from January through March, rising from roughly 1,500 trips per day in early January to over 3,500 by late March, reflecting the seasonal effect of warming temperatures making cycling more appealing. There is also a strong weekly cyclical pattern throughout the quarter, with regular peaks and troughs corresponding to weekdays versus weekends. The most notable anomaly is the sharp spike on February 14th, which far exceeds any typical Friday ridership — this was the day of the Philadelphia Eagles Super Bowl victory parade, which drew massive crowds downtown and drove an unusual surge in bike share usage.
 
-### Hourly Patterns
+#### Hourly Patterns
 
 ```{r hourly_patterns}
 # Average trips by hour and day type
@@ -209,7 +239,7 @@ ggplot(hourly_patterns, aes(x = hour, y = avg_trips, color = day_type)) +
 
 Weekdays show two sharp peaks at hour 8 (morning rush, \~210 trips) and hour 17 (evening rush, \~270 trips), with a notable dip in between, reflecting classic commuter behavior. Weekends show a very different pattern with no morning spike, instead rising gradually from mid-morning and plateauing broadly between hours 12 and 17 at around 150 trips, suggesting recreational rather than commute-driven usage. Overall, weekdays have higher peak demand but weekends sustain more consistent midday ridership.
 
-### Top Stations
+#### Top Stations
 
 ```{r top_stations}
 # Most popular origin stations
@@ -224,7 +254,7 @@ kable(top_stations,
   kable_styling(bootstrap_options = c("striped", "hover"))
 ```
 
-## Load Philadelphia Census Data
+### Load Philadelphia Census Data
 
 ```{r load_census}
 #| message: false
@@ -264,7 +294,7 @@ philly_census <- get_acs(
 
 ```
 
-### Map Philadelphia Context
+#### Map Philadelphia Context
 
 ```{r map_philly}
 # Map median income
@@ -288,7 +318,7 @@ ggplot() +
   mapTheme
 ```
 
-### Join Census Data to Stations
+#### Join Census Data to Stations
 
 ```{r join_census_to_stations}
 # Create sf object for stations
@@ -364,7 +394,7 @@ ggplot() +
 
 ```
 
-### Dealing with missing data
+#### Dealing with missing data
 
 ```{r}
 # Identify which stations to keep
@@ -384,7 +414,7 @@ indego_census <- indego %>%
 
 ```
 
-## Get Weather Data
+### Get Weather Data
 
 ```{r get_weather}
 
@@ -430,7 +460,7 @@ summary(weather_complete %>% select(Temperature, Precipitation, Wind_Speed))
 
 ```
 
-### Visualize Weather Patterns
+#### Visualize Weather Patterns
 
 ```{r visualize-weather}
 #| message: false
@@ -448,7 +478,7 @@ ggplot(weather_complete, aes(x = interval60, y = Temperature)) +
   plotTheme
 ```
 
-## Aggregate Trips to Station-Hour Level
+### Aggregate Trips to Station-Hour Level
 
 ```{r aggregate-trips}
 #| message: false
@@ -474,7 +504,7 @@ length(unique(trips_panel$interval60))
 hist(trips_panel$Trip_Count)
 ```
 
-## Create Complete Panel Structure
+### Create Complete Panel Structure
 
 Not every station has trips every hour. We need a **complete panel** where every station-hour combination exists (even if Trip_Count = 0).
 
@@ -527,7 +557,7 @@ glimpse(study_panel)
 cat("Complete panel rows:", format(nrow(study_panel), big.mark = ","), "\n")
 ```
 
-## Add Time Features
+### Add Time Features
 
 ```{r add_time_features}
 study_panel <- study_panel %>%
@@ -544,7 +574,7 @@ study_panel <- study_panel %>%
 glimpse(study_panel)
 ```
 
-## Join Weather Data
+### Join Weather Data
 
 ```{r join_weather}
 study_panel <- study_panel %>%
@@ -556,7 +586,7 @@ glimpse(study_panel)
 summary(study_panel %>% select(Trip_Count, Temperature, Precipitation))
 ```
 
-## CREATE TEMPORAL LAG VARIABLES
+### CREATE TEMPORAL LAG VARIABLES
 
 ```{r create_lags}
 # Sort by station and time
@@ -582,7 +612,7 @@ study_panel_complete <- study_panel %>%
 cat("Rows after removing NA lags:", format(nrow(study_panel_complete), big.mark = ","), "\n")
 ```
 
-## Visualize Lag Correlations
+### Visualize Lag Correlations
 
 ```{r lag_correlations}
 # Sample one station to visualize
@@ -610,7 +640,7 @@ ggplot(example_station, aes(x = interval60)) +
   plotTheme
 ```
 
-## TEMPORAL TRAIN/TEST SPLIT
+### TEMPORAL TRAIN/TEST SPLIT
 
 
 
@@ -655,11 +685,11 @@ cat("Testing date range:", min(test$date), "to", max(test$date), "\n")
 
 ```
 
-## BUILD PREDICTIVE MODELS
+### BUILD PREDICTIVE MODELS
 
 We'll build 5 models with increasing complexity to see what improves predictions.
 
-### Model 1: Baseline (Time + Weather)
+#### Model 1: Baseline (Time + Weather)
 
 ```{r model1}
 #| results: hide
@@ -697,7 +727,7 @@ The model uses Monday as the baseline. Each coefficient represents the differenc
 Hour Coefficient Interpretation 0 (baseline) 0.000 trips/hour (midnight) 1 -0.018 slightly fewer than midnight ... 6 +0.151 morning activity starting 7 +0.276 morning rush building 8 +0.487 PEAK morning rush 9 +0.350 post-rush ... 17 +0.568 PEAK evening rush (5 PM!) 18 +0.389 evening declining ... 23 +0.034 late night minimal
 
 
-### Model 2: Add Temporal Lags
+#### Model 2: Add Temporal Lags
 
 ```{r model2}
 #| results: hide
@@ -711,7 +741,7 @@ summary(model2)
 ```
 
 
-### Model 3: Add Demographics
+#### Model 3: Add Demographics
 
 ```{r model3}
 #| results: hide
@@ -725,7 +755,7 @@ model3 <- lm(
 summary(model3)
 ```
 
-### Model 4: Add Station Fixed Effects
+#### Model 4: Add Station Fixed Effects
 
 ```{r model4}
 #| results: hide
@@ -743,7 +773,7 @@ cat("Model 4 Adj R-squared:", summary(model4)$adj.r.squared, "\n")
 ```
 
 
-### Model 5: Add Rush Hour Interaction
+#### Model 5: Add Rush Hour Interaction
 
 ```{r model5}
 #| results: hide
@@ -760,9 +790,9 @@ cat("Model 5 R-squared:", summary(model5)$r.squared, "\n")
 cat("Model 5 Adj R-squared:", summary(model5)$adj.r.squared, "\n")
 ```
 
-## MODEL EVALUATION
+### MODEL EVALUATION
 
-### Calculate Predictions and MAE
+#### Calculate Predictions and MAE
 
 ```{r calculate_mae}
 # Get predictions on test set
@@ -810,7 +840,7 @@ kable(mae_results,
 mae_results_q1 <- mae_results
 ```
 
-### Visualize Model Comparison
+#### Visualize Model Comparison
 
 ```{r compare_models}
 ggplot(mae_results, aes(x = reorder(Model, -MAE), y = MAE)) +
@@ -827,9 +857,9 @@ ggplot(mae_results, aes(x = reorder(Model, -MAE), y = MAE)) +
 ```
 
 
-## SPACE-TIME ERROR ANALYSIS
+### SPACE-TIME ERROR ANALYSIS
 
-### Observed vs. Predicted
+#### Observed vs. Predicted
 
 Let's use our best model (Model 2) for error analysis.
 
@@ -868,7 +898,7 @@ ggplot(test, aes(x = Trip_Count, y = pred2)) +
 
 
 
-### Spatial Error Patterns
+#### Spatial Error Patterns
 
 
 ```{r spatial_errors}
@@ -1032,7 +1062,7 @@ p2 <- ggplot() +
 ```
 
 
-### Temporal Error Patterns
+#### Temporal Error Patterns
 
 When are we most wrong?
 
@@ -1060,7 +1090,7 @@ ggplot(temporal_errors, aes(x = time_of_day, y = MAE, fill = day_type)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-## Errors and Demographics
+### Errors and Demographics
 
 Are prediction errors related to neighborhood characteristics?
 
@@ -1101,9 +1131,9 @@ p3 <- ggplot(station_errors_demo, aes(x = Percent_White, y = MAE)) +
 
 
 
-# 3. Assessing Q2 2025 Indego Bikeshare Patterns
+## 4.2 Q2 2025 Analysis
 
-## Load and Process Indego Trip Data (Q2 2025)
+### Load and Process Indego Trip Data (Q2 2025)
 ```{r}
 indego_q2 <- read_csv(here("data/indego-trips-2025-q2.csv"))
 cat("Total trips in Q2 2025:", nrow(indego_q2), "\n")
@@ -1130,7 +1160,7 @@ indego_q2 <- indego_q2 %>%
 head(indego_q2 %>% select(start_datetime, interval60, week, dotw, hour, weekend))
 ```
 
-### Daily Trip
+#### Daily Trip
 ```{r trips_over_time_q2}
 #| message: false
 #| warning: false
@@ -1153,7 +1183,7 @@ ggplot(daily_trips_q2, aes(x = date, y = trips)) +
 It has a different pattern from Q1, that there is no spikes.
 
 
-### Hourly Patterns
+#### Hourly Patterns
 ```{r hourly_patterns_q2}
 hourly_patterns_q2 <- indego_q2 %>%
   group_by(hour, weekend) %>%
@@ -1172,7 +1202,7 @@ ggplot(hourly_patterns_q2, aes(x = hour, y = avg_trips, color = day_type)) +
   ) +
   plotTheme
 ```
-### Top Stations
+#### Top Stations
 ```{r top_stations_q2}
 top_stations_q2 <- indego_q2 %>%
   count(start_station, start_lat, start_lon, name = "trips") %>%
@@ -1185,7 +1215,7 @@ kable(top_stations_q2,
   kable_styling(bootstrap_options = c("striped", "hover"))
 ```
 
-## Join Census Data to Q2 Stations
+### Join Census Data to Q2 Stations
 `philly_census` is already loaded from Q1. We reuse it and rejoin to Q2 stations.
 ```{r join_census_q2}
 #| message: false
@@ -1230,7 +1260,7 @@ indego_census_q2 <- indego_q2 %>%
     by = "start_station"
   )
 ```
-## Get weather Data for Q2 2025
+### Get weather Data for Q2 2025
 ```{r get_weather_q2}
 weather_raw_q2 <- read_csv(
   paste0(
@@ -1286,7 +1316,7 @@ ggplot(weather_complete_q2, aes(x = interval60, y = Temperature)) +
   plotTheme
 ```
 
-## Create Space-Time Panel
+### Create Space-Time Panel
 ```{r aggregate-trips-q2}
 #| message: false
 #| warning: false
@@ -1353,7 +1383,7 @@ study_panel_q2 <- study_panel_q2 %>%
 
 summary(study_panel_q2 %>% select(Trip_Count, Temperature, Precipitation))
 ```
-### Create Temporal Lag Variables
+#### Create Temporal Lag Variables
 ```{r create_lags_q2}
 study_panel_q2 <- study_panel_q2 %>%
   arrange(start_station, interval60) %>%
@@ -1388,9 +1418,9 @@ ggplot(example_station_q2, aes(x = interval60)) +
   plotTheme
 ```
 
-## Build Predictive models
+### Build Predictive models
 
-### Temporal train and test split
+#### Temporal train and test split
 Q2 spans weeks 14 to 26. We train on weeks 14-22 (April through May) and test on weeks 23-26 (June).
 
 ```{r temporal-split-q2}
@@ -1417,7 +1447,7 @@ cat("Testing date range:",  min(test_q2$date),  "to", max(test_q2$date), "\n")
 ```
 
 
-### Model 1: Baseline (Time + Weather)
+#### Model 1: Baseline (Time + Weather)
 
 ```{r model1_q2}
 #| results: hide
@@ -1431,7 +1461,7 @@ model1_q2 <- lm(
 )
 summary(model1_q2)
 ```
-### Model 2: Add Temporal Lags
+#### Model 2: Add Temporal Lags
 ```{r model2_q2}
 #| results: hide
 model2_q2 <- lm(
@@ -1441,7 +1471,7 @@ model2_q2 <- lm(
 )
 summary(model2_q2)
 ```
-### Model 3: Add Demographics
+#### Model 3: Add Demographics
 ```{r model3_q2}
 #| results: hide
 model3_q2 <- lm(
@@ -1452,7 +1482,7 @@ model3_q2 <- lm(
 )
 summary(model3_q2)
 ```
-### Model 4: Add Station Fixed Effects
+#### Model 4: Add Station Fixed Effects
 ```{r model4_q2}
 #| results: hide
 model4_q2 <- lm(
@@ -1465,7 +1495,7 @@ model4_q2 <- lm(
 cat("Model 4 R-squared:", summary(model4_q2)$r.squared, "\n")
 cat("Model 4 Adj R-squared:", summary(model4_q2)$adj.r.squared, "\n")
 ```
-### Model 5: Add Rush Hour Interaction
+#### Model 5: Add Rush Hour Interaction
 ```{r model5_q2}
 #| results: hide
 model5_q2 <- lm(
@@ -1479,7 +1509,7 @@ model5_q2 <- lm(
 cat("Model 5 R-squared:", summary(model5_q2)$r.squared, "\n")
 cat("Model 5 Adj R-squared:", summary(model5_q2)$adj.r.squared, "\n")
 ```
-### Model Evaluation
+#### Model Evaluation
 ```{r calculate_mae_q2}
 test_q2 <- test_q2 %>%
   mutate(dotw_simple = factor(dotw, levels = c("Mon","Tue","Wed","Thu","Fri","Sat","Sun")))
@@ -1527,7 +1557,7 @@ kable(mae_results_q2, digits = 3,
 ```
 **Interpretation**: The largest improvement comes from adding temporal lags in Model 2, reducing MAE from 0.835 to 0.690 and improving R² from 0.112 to 0.305, confirming that past demand is by far the strongest predictor. Adding demographics in Model 3 yields only marginal gains, while station fixed effects in Model 4 provide a small but meaningful improvement in R² (0.337) and RMSE (1.040), capturing baseline differences in busyness across stations. Interestingly, Model 5 slightly increases MAE and RMSE despite a higher R², suggesting the rush hour interaction may be overfitting to the training data and not generalizing well to the June test period.
 
-### Visualize q2 model comparison
+#### Visualize q2 model comparison
 
 ```{r compare_models_q2}
 ggplot(mae_results_q2, aes(x = reorder(Model, -MAE), y = MAE)) +
@@ -1540,7 +1570,7 @@ ggplot(mae_results_q2, aes(x = reorder(Model, -MAE), y = MAE)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-# 4. Q1 vs Q2 Model Comparison
+#### Q1 vs Q2 Model Comparison
 
 ```{r compare_quarters}
 comparison <- bind_rows(
@@ -1560,10 +1590,9 @@ ggplot(comparison, aes(x = Model, y = MAE, fill = Quarter)) +
 **Interpretation**:
 Q1 consistently outperforms Q2 across all five models, with Q1 MAE ranging from 0.63 to 0.53 compared to Q2's 0.84 to 0.71. This difference likely reflects the higher and more variable demand in spring and early summer, where warmer weather, recreational riding, and special events introduce greater unpredictability that the model struggles to capture. Both quarters show the same pattern of temporal lags providing the biggest single improvement, confirming that past demand is the most important predictor regardless of season. In Q2, additional complexity from demographics and station fixed effects yields smaller marginal gains, suggesting that Q2 demand is driven more by weather and temporal factors than by neighborhood characteristics.
 
+### Space-Time Error Analysis
 
-## Space-Time Error Analysis
-
-### Observed vs. Predicted
+#### Observed vs. Predicted
 ```{r obs_vs_pred_q2}
 #| message: false
 #| warning: false
@@ -1602,7 +1631,8 @@ p2 <- ggplot(test_q2, aes(x = Trip_Count, y = pred2)) +
 
 p1 / p2
 ```
-### Spatial Error Patterns
+
+#### Spatial Error Patterns
 ```{r spatial_errors_q2}
 station_errors_q2 <- test_q2 %>%
   filter(!is.na(pred2)) %>%
@@ -1646,10 +1676,11 @@ p2 <- ggplot() +
 
 (p1 | p2)
 ```
+
 **Interpretation**:
 Similar pattern to Q1. Prediction errors are spatially clustered and strongly correlated with average demand, with the highest MAE concentrated in Center City and the area just north of it where ridership is also highest. This is expected since high-demand stations experience greater absolute variability that the model struggles to capture. Outer neighborhoods with lower demand show lower MAE, but this may reflect a floor effect rather than better model fit. The spatial overlap between high-error and high-demand stations suggests the model systematically underpredicts at the busiest locations, which is the most operationally problematic pattern since those are precisely the stations that need accurate forecasts for effective rebalancing.
 
-### Temporal Error Patterns
+#### Temporal Error Patterns
 ```{r temporal_errors_q2}
 temporal_errors_q2 <- test_q2 %>%
   group_by(time_of_day, weekend) %>%
@@ -1671,11 +1702,12 @@ ggplot(temporal_comparison, aes(x = time_of_day, y = MAE, fill = Quarter)) +
   plotTheme +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
+
 **Interpretation**:
 For q2, PM Rush hours show the highest prediction errors for both weekdays (~0.97) and weekends (~0.93), indicating the model struggles most when afternoon demand peaks are at their most intense and variable in Q2. AM Rush and Evening periods also show elevated errors, while Overnight hours have the lowest MAE (~0.30) as expected given minimal and highly predictable demand. Notably, weekends tend to have slightly lower errors than weekdays during peak periods, likely because weekend demand is more gradual and spread out, making it easier to predict. The consistently high errors during rush hours suggest the model is missing features that capture day-to-day variability in commute intensity, such as weather interactions with peak hours or event-driven demand spikes unique to spring.
 
 
-### Demographic patterns
+#### Demographic patterns
 ```{r errors_demographics_q2}
 #| message: false
 #| warning: false
@@ -1719,7 +1751,7 @@ p3 <- ggplot(station_errors_demo_combined, aes(x = Percent_White, y = MAE, color
 **Interpretation**: 
 For q2, All three plots reveal systematic demographic patterns in prediction errors. Higher-income neighborhoods show higher MAE, likely because wealthier areas tend to be in Center City where demand is more intense and variable. The negative relationship with transit usage suggests that stations in transit-dependent neighborhoods, typically lower-income communities, are actually easier to predict, possibly because their ridership patterns are more routine and less influenced by discretionary spring activity. The positive relationship with percent White mirrors the income pattern, reflecting the spatial overlap between race, wealth, and Center City location in Philadelphia. Together these findings raise equity concerns: the model performs worst in affluent, majority-white neighborhoods where Indego is already well-resourced, while performing better in lower-income, higher-transit communities that may have less margin for rebalancing errors.
 
-# 5.  Feature Engineering & model improvement
+#### Feature Engineering and Model Improvement
 
 Three new features are added motivated by Q2-specific conditions: `perfect_weather` flags hours with temperatures between 60 and 75°F and no precipitation, capturing ideal biking conditions unique to spring. `semester_end` marks the final weeks of university spring semesters at Penn, Drexel, and Temple (April 21 to May 15), when student activity patterns shift significantly. `memorial_day` flags May 26th as a federal holiday with distinct recreational demand patterns.
 
@@ -1741,7 +1773,7 @@ test_q2 <- test_q2 %>%
   )
 ```
 
-## Model 6: Model 4 + New Features (OLS)
+### Model 6: Model 4 + New Features (OLS)
 
 ```{r model6_q2}
 #| results: hide
@@ -1756,7 +1788,7 @@ model6_q2 <- lm(
 cat("Model 6 R-squared:", summary(model6_q2)$r.squared, "\n")
 cat("Model 6 Adj R-squared:", summary(model6_q2)$adj.r.squared, "\n")
 ```
-## Model 7: Model 4 + New Features (Poisson)
+### Model 7: Model 4 + New Features (Poisson)
 ```{r model_poisson_q2}
 #| warning: false
 #| results: hide
@@ -1779,7 +1811,7 @@ model_poisson_q2 <- fastglm(X_train, y_train, family = poisson(link = "log"))
 cat("Poisson AIC:", model_poisson_q2$aic, "\n")
 ```
 
-## Model Comparison
+### Model Comparison
 ```{r mae_all_models_q2}
 # Build test model matrix and track which rows are kept
 X_test <- model.matrix(
@@ -1843,9 +1875,9 @@ kable(mae_all_q2, digits = 3,
 Adding the three new Q2-specific features in Model 6 provides a marginal improvement over Model 4, reducing MAE from 0.687 to 0.689, which is essentially no change in OLS. However, the Poisson model in Model 7 achieves the best MAE overall at 0.658, a meaningful improvement over Model 4's 0.687, confirming that modeling trip counts as a count variable better captures the distributional properties of the data than OLS. The slightly higher RMSE in Model 7 (1.052 vs 1.040) suggests the Poisson model reduces average errors but occasionally produces larger outlier predictions. Overall, the new features alone do not dramatically improve OLS performance, but the Poisson specification demonstrates that treating demand as count data is a more theoretically appropriate modeling choice for bike share prediction.
 
 
-# 6. Critical Reflection
+#### Critical Reflection
 
-## Operational Implications
+### Operational Implications
 
 The final Poisson model achieves an MAE of 0.658 trips per station-hour, meaning predictions 
 are off by less than one trip on average. For low-demand overnight and midday periods this is 
@@ -1859,7 +1891,7 @@ system, with human operators retaining override authority; with mandatory real-t
 of stations where predicted and observed demand diverge consistently; and with a buffer 
 inventory policy at historically high-error stations to absorb prediction uncertainty.
 
-## Equity Considerations
+### Equity Considerations
 
 The error analysis reveals a troubling spatial pattern: prediction errors are highest in 
 wealthier, majority-white, Center City neighborhoods and lowest in lower-income, 
@@ -1874,7 +1906,7 @@ rebalancing targets that account for transit dependency and income levels, regul
 prediction performance disaggregated by neighborhood demographics, and involving community 
 stakeholders in defining acceptable service levels across different parts of the city.
 
-## Model Limitations
+### Model Limitations
 
 The model assumes that historical temporal patterns repeat consistently, an assumption that 
 breaks down during special events, extreme weather, or structural shifts in travel behavior. 
@@ -1890,3 +1922,4 @@ weights matrix to capture the spillover effects of demand between neighboring st
 
 ------------------------------------------------------------------------
 
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
