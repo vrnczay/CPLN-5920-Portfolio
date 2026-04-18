@@ -22,6 +22,8 @@ website:
             text: "Lab 3: Philadelphia Housing Model"
           - href: labs/lab_4/lab4.qmd
             text: "Lab 4: Spatial Predictive Analysis"
+          - href: labs/lab_5/week11_inclass_and_lab5.qmd
+            text: "Lab 5: Space-Time Prediction of Bikeshare"
 
 format:
   html:
