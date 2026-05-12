@@ -24,6 +24,8 @@ website:
             text: "Lab 4: Spatial Predictive Analysis"
           - href: labs/lab_5/week11_inclass_and_lab5.qmd
             text: "Lab 5: Space-Time Prediction of Bikeshare"
+          - href: labs/lab_6/lab6.1.qmd
+            text: "Lab 6: Predicting SEPTA Bus Stop Ridership"
 
 format:
   html:

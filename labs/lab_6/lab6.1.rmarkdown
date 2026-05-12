@@ -1,0 +1,1355 @@
+---
+title: "Predicting SEPTA Bus Stop Ridership"
+subtitle: "CPLN 5920 - Spring 2026"
+author: "Coco Zhou, Parker Otto, Veronica Zheng, Zhuosi Yang"
+format:
+  html:
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# 1. Introduction
+
+Philadelphia's bus network plays an important role in connecting residents to jobs, schools, services, and other daily destinations. When the city or SEPTA considers adding a new bus stop, one important planning question is whether that location is likely to attract enough riders to justify the investment. Because ridership is shaped by more than the stop itself, this question requires looking at the surrounding neighborhood context, including who lives nearby, how people travel, what land uses are present, and how the proposed stop fits into the existing transit network.
+
+This report develops a predictive model to estimate expected average daily ridership at potential bus stop locations in Philadelphia. The model uses demographic, land-use, and spatial characteristics around existing stops to understand which factors are associated with higher or lower weekday ridership. By learning from current stop patterns, the model can be used as a planning tool to compare candidate locations for future bus stops.
+
+**Data Sources**: This analysis uses four types of data. The main dataset is the [SEPTA Summer 2025 Bus Stop Summary](https://opendataphilly.org/datasets/septa-ridership-statistics/) from OpenDataPhilly, which gives average daily boardings and alightings at every bus stop collected by Automatic Passenger Counters. Demographic features come from the [American Community Survey (ACS) 2023 5-Year Estimates](https://www.census.gov/programs-surveys/acs) at the Census tract level, accessed with the `tidycensus` R package. These include no-vehicle household share, poverty rate, population density, and transit commute share. Employment data come from the [LEHD Origin-Destination Employment Statistics (LODES)](https://lehd.ces.census.gov/data/) dataset produced by the U.S. Census Bureau. Total job counts are aggregated to the Census tract level and joined to bus stops to measure nearby employment activity. Spatial features come from several [OpenDataPhilly](https://opendataphilly.org/) datasets, including schools, hospitals, colleges, crash locations, business licenses, parcels, parks, and neighborhood boundaries. The city boundary is pulled with the `tigris` R package.
+
+# 2. Data Preparation & Cleaning
+
+```{r setup}
+
+library(MASS)
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(tigris)
+library(janitor)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(scales)
+library(car)
+```
+
+## 2.1 Read Ridership Data
+
+The primary dataset is the **SEPTA Summer 2025 Bus Stop Summary**, which provides average daily boardings and alightings at every bus stop, broken down by weekday, Saturday, and Sunday. Data are collected via Automatic Passenger Counters (APC).
+
+> **Download:** If you do not have the dataset, download it from [SEPTA Ridership Statistics on OpenDataPhilly](https://opendataphilly.org/datasets/septa-ridership-statistics/). Select the Bus Stop Summary file and save it to your local `data/` folder as `Summer_2025_Stop_Summary_(Bus).csv`.
+
+```{r read-ridership}
+
+stop_ridership <- read_csv("data/Summer_2025_Stop_Summary_(Bus).csv") %>%
+  clean_names()
+```
+
+```{r explore-ridership}
+
+head(stop_ridership, 10)
+cat("Total stop-route observations:", nrow(stop_ridership), "\n")
+cat("Unique stop codes:", n_distinct(stop_ridership$stop_code), "\n")
+cat("Unique routes:", n_distinct(stop_ridership$route), "\n")
+```
+
+```{r aggregate-ridership}
+
+# Aggregate to one row per unique stop
+# Some stops appear on multiple routes, so we sum ridership across routes per stop
+stop_ridership_agg <- stop_ridership %>%
+  group_by(stop_code, stop, lat, lon, x, y) %>%
+  summarise(
+    weekday_boardings   = sum(weekdays_o, na.rm = TRUE),
+    weekday_alightings  = sum(weekdays_1, na.rm = TRUE),
+    saturday_boardings  = sum(saturdays,  na.rm = TRUE),
+    saturday_alightings = sum(saturdays1, na.rm = TRUE),
+    sunday_boardings    = sum(sundays_on, na.rm = TRUE),
+    sunday_alightings   = sum(sundays_of, na.rm = TRUE),
+    n_routes            = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    weekday_total  = weekday_boardings  + weekday_alightings,
+    saturday_total = saturday_boardings + saturday_alightings,
+    sunday_total   = sunday_boardings   + sunday_alightings
+  )
+```
+
+Because the raw ridership file is organized at the route-stop level, some physical stops appear more than once when they are served by multiple routes or directions. To create a stop-level ridership measure, we grouped the data by stop code, stop name, and coordinates, then summed boardings and alightings across route records for each stop. This produces one total weekday ridership value for each unique stop.
+
+```{r}
+stop_ridership_agg %>%
+  summarise(
+    count = n(),
+    min_weekday = min(weekday_total, na.rm = TRUE),
+    median_weekday = median(weekday_total, na.rm = TRUE),
+    mean_weekday = mean(weekday_total, na.rm = TRUE),
+    max_weekday = max(weekday_total, na.rm = TRUE)
+  )
+
+```
+
+From the table we can see that a few stops are very busy while many stops are not. This shows that our data is very uneven.
+
+After aggregating to one row per unique stop, the dataset contains **`r nrow(stop_ridership_agg)` stops**. SEPTA records ridership for three day types: weekday, Saturday, and Sunday. The chart below compares average total activity per stop across all three day types.
+
+```{r day-comparison}
+#| fig-cap: "Average Total Activity per Stop by Day Type"
+#| fig-width: 7
+#| fig-height: 4
+
+stop_ridership_agg %>%
+  summarise(
+    Weekday  = mean(weekday_total,  na.rm = TRUE),
+    Saturday = mean(saturday_total, na.rm = TRUE),
+    Sunday   = mean(sunday_total,   na.rm = TRUE)
+  ) %>%
+  pivot_longer(everything(), names_to = "Day Type", values_to = "Avg Total") %>%
+  mutate(`Day Type` = factor(`Day Type`, levels = c("Weekday", "Saturday", "Sunday"))) %>%
+  ggplot(aes(x = `Day Type`, y = `Avg Total`, fill = `Day Type`)) +
+  geom_col(width = 0.5, alpha = 0.85) +
+  scale_fill_manual(values = c("#2C7BB6", "#ABD9E9", "#FDAE61")) +
+  labs(title = "Average Total Activity per Stop by Day Type",
+       x = NULL, y = "Avg Boardings + Alightings") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Weekday activity is much higher than Saturday and Sunday. Therefore, we will be using **weekday total** (boardings + alightings) as the outcome variable because it captures the most complete and policy-relevant demand signal for a typical workday.
+
+------------------------------------------------------------------------
+
+## 2.2 Census / ACS Data
+
+ACS 2023 5-year estimates are pulled at the Census tract level for Philadelphia County. These variables capture the demographic and socioeconomic characteristics most linked to transit demand.
+
+> **API Key:** A free Census API key is required. Register at [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html) and set it once with `census_api_key("YOUR_KEY_HERE", install = TRUE)`.
+
+The following features were selected from the ACS:
+
+- **Total population** (`B01003_001`). Baseline count of how many people live near a stop.
+- **Median household income** (`B19013_001`). Income shapes car ownership and how much people depend on transit.
+- **No-vehicle households** (`B08201_002` / `B08201_001`). Computed as a share. Car-free households are the most transit-dependent group.
+- **Poverty rate** (`B17001_002` / `B17001_001`). Low-income residents are more likely to use transit for daily trips.
+- **Renter share** (`B25003_003` / `B25003_001`). Renters tend to live in denser areas and rely on transit more.
+- **Transit commute share** (`B08301_010` / `B08301_001`). The share of workers who already commute by public transit, which is a direct signal of existing demand.
+- **Bachelor's degree share** (`B15003_022` / `B15003_001`). Educational attainment used as a socioeconomic control.
+- **Population density** (derived from total population and tract area in sq miles). Denser areas tend to have more pedestrian activity and transit use.
+- **Housing density** (derived from housing units and tract area). A land-use measure of how built-up the area is around a stop.
+
+```{r census-pull}
+#| results: 'hide'
+census_vars <- c(
+  total_pop           = "B01003_001",
+  median_income       = "B19013_001",
+  no_vehicle_hh       = "B08201_002",
+  total_hh            = "B08201_001",
+  poverty             = "B17001_002",
+  total_poverty_denom = "B17001_001",
+  renters             = "B25003_003",
+  total_tenure        = "B25003_001",
+  transit_commute     = "B08301_010",
+  total_commuters     = "B08301_001",
+  bachelors_plus      = "B15003_022",
+  pop_25_plus         = "B15003_001",
+  housing_units       = "B25001_001"
+)
+
+acs_tracts <- get_acs(
+  geography = "tract",
+  variables = census_vars,
+  state     = "PA",
+  county    = "Philadelphia",
+  year      = 2023,
+  geometry  = TRUE,
+  output    = "wide"
+) %>%
+  clean_names() %>%
+  st_transform(crs = 2272)
+```
+
+```{r census-derived-vars}
+
+acs_tracts <- acs_tracts %>%
+  mutate(
+    no_vehicle_share = no_vehicle_hh_e / total_hh_e,
+    poverty_rate     = poverty_e       / total_poverty_denom_e,
+    renter_share     = renters_e       / total_tenure_e,
+    transit_share    = transit_commute_e / total_commuters_e,
+    bachelors_share  = bachelors_plus_e  / pop_25_plus_e,
+    pop_density      = total_pop_e     / (as.numeric(st_area(geometry)) / 27878400),
+    housing_density  = housing_units_e / (as.numeric(st_area(geometry)) / 27878400)
+  )
+```
+
+------------------------------------------------------------------------
+
+## 2.3 OpenDataPhilly Spatial Data
+
+The following layers are pulled directly from OpenDataPhilly to construct spatial features around each bus stop. All sources are publicly available.
+
+> **Schools**. [Philadelphia Schools (OpenDataPhilly)](https://opendataphilly.org/datasets/schools/) Proximity to schools captures student ridership demand.
+
+```{r schools}
+#| results: 'hide'
+schools <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/d46a7e59e2c246c891fbee778759717e_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Hospitals**. [Philadelphia Hospitals (OpenDataPhilly)](https://opendataphilly.org/datasets/philadelphia-hospitals/) Major medical facilities are consistent high-volume trip generators.
+
+```{r hospitals}
+#| results: 'hide'
+hospitals <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/df8dc18412494e5abbb021e2f33057b2_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Colleges & Universities**. [Philadelphia Colleges and Universities (OpenDataPhilly)](https://opendataphilly.org/datasets/philadelphia-universities-and-colleges/) College campuses generate significant transit ridership, especially for car-free students.
+
+```{r colleges}
+#| results: 'hide'
+colleges <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/8ad76bc179cf44bd9b1c23d6f66f57d1_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Pedestrian & Bike Crashes**. [Crashes (OpenDataPhilly)](https://opendataphilly.org/datasets/crashes/) Crash density serves as a proxy for pedestrian street activity near stops.
+
+```{r crashes}
+#| results: 'hide'
+crashes <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/21154a8f1894449f839d2288726e9837_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Street Intersection**. [Intersections Control (OpenDataPhilly)](https://opendataphilly.org/datasets/intersection-controls/) Intersection density captures street connectivity and pedestrian walkability around a stop.
+
+```{r intersections}
+#| results: 'hide'
+intersections <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/cc0e1bfe7a3d4814a0a0329c2650c62e_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Business Licenses**. [Business Licenses (OpenDataPhilly)](https://opendataphilly.org/datasets/business-licenses/) Active business licenses are used as a proxy for commercial activity and foot traffic near stops.
+
+```{r businesses}
+#| results: 'hide'
+businesses <- st_read(
+  "https://phl.carto.com/api/v2/sql?q=SELECT+*+FROM+business_licenses&filename=business_licenses&format=geojson&skipfields=cartodb_id",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Property Parcels**. [Philadelphia Land Use (OpenDataPhilly)](https://opendataphilly.org/datasets/land-use/) Parcel data are used to count commercial, residential, and vacant land uses within a buffer.
+
+```{r parcels}
+#| results: 'hide'
+parcels <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/e433504739bd41049de5d8f4a22d34ba_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Parks & Recreation**. [PPR Properties (OpenDataPhilly)](https://opendataphilly.org/datasets/ppr-properties/) Parks and recreation sites generate leisure-trip ridership.
+
+```{r parks}
+#| results: 'hide'
+parks <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/d52445160ab14380a673e5849203eb64_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Neighborhood Boundaries**. [Philadelphia Neighborhoods (OpenDataPhilly)](https://opendataphilly.org/datasets/philadelphia-neighborhoods/) Neighborhood identifiers are used to add fixed effects that control for unmeasured place-based variation.
+
+```{r neighborhoods}
+#| results: 'hide'
+neighborhoods <- st_read(
+  "https://raw.githubusercontent.com/opendataphilly/open-geo-data/master/philadelphia-neighborhoods/philadelphia-neighborhoods.geojson",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272)
+```
+
+> **Employment (LODES/LEHD)**. [LEHD Origin-Destination Employment Statistics (Census Bureau)](https://lehd.ces.census.gov/data/) Job counts at the Census tract level are used as a measure of nearby employment activity around each stop.
+
+```{r lodes}
+#| results: 'hide'
+lodes_url <- "https://lehd.ces.census.gov/data/lodes/LODES8/pa/wac/pa_wac_S000_JT00_2021.csv.gz"
+
+lodes_tract <- read_csv(lodes_url) %>%
+  mutate(tract_geoid = str_sub(as.character(w_geocode), 1, 11)) %>%
+  group_by(tract_geoid) %>%
+  summarise(total_jobs = sum(C000, na.rm = TRUE), .groups = "drop")
+```
+
+> **All Transit Stops (Bus, Trolley, Rail)**. [SEPTA Routes, Stops, and Locations (OpenDataPhilly)](https://opendataphilly.org/datasets/septa-routes-stops-and-locations/) Rail and trolley stop locations are used to measure distance from each bus stop to the nearest higher-order transit service.
+
+```{r transit-stops}
+#| results: 'hide'
+transit_stops <- st_read(
+  "https://hub.arcgis.com/api/v3/datasets/b227f3ddbe3e47b4bcc7b7c65ef2cef6_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1",
+  quiet = TRUE
+) %>%
+  st_transform(crs = 2272) %>%
+  filter(grepl("^[A-Za-z]", LineAbbr))
+```
+
+> **Philadelphia City Boundary**. Pulled via the `tigris` package. No API key required.
+
+```{r philly-boundary}
+#| results: 'hide'
+philly <- counties(state = "PA", cb = TRUE) %>%
+  filter(NAME == "Philadelphia") %>%
+  st_transform(crs = 2272)
+```
+
+------------------------------------------------------------------------
+
+## 2.4 Data Cleaning
+
+The raw ridership file has one row per stop per route, so each physical stop appears multiple times. After grouping to one row per stop, we apply two filters before modeling: we drop stops with no geographic coordinates, and stops that fall outside the Philadelphia city boundary.
+
+```{r data-cleaning}
+#| results: 'hide'
+
+# Step 1: baseline, unique stops after aggregation
+n_raw <- nrow(stop_ridership_agg)
+
+# Step 2: remove missing coordinates
+stops_no_na <- stop_ridership_agg %>%
+  filter(!is.na(lat), !is.na(lon))
+n_after_coords <- nrow(stops_no_na)
+
+# Step 3: convert to sf and clip to Philadelphia boundary
+# Pennsylvania State Plane South (feet) for distance calculations
+stops_sf <- stops_no_na %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(crs = 2272) %>% 
+  select(-x, -y) %>%
+  st_filter(philly)
+n_after_philly <- nrow(stops_sf)
+
+```
+
+```{r cleaning-table}
+#| tbl-cap: "Data Cleaning Log: SEPTA Bus Stop Ridership"
+tibble(
+  Step = c(
+    "Aggregate stop-route rows to unique stops",
+    "Remove stops with missing coordinates",
+    "Clip to Philadelphia city boundary",
+    "Final analytic sample"
+  ),
+  Rows = c(
+    n_raw,
+    n_after_coords,
+    n_after_philly,
+    n_after_philly
+  ),
+  Removed = c(
+    0L,
+    n_raw - n_after_coords,
+    n_after_coords - n_after_philly,
+    0L
+  )
+) %>%
+  kable(
+    col.names = c("Step", "Rows", "Removed"),
+    caption = "Data Cleaning Log: SEPTA Bus Stop Ridership",
+    format.args = list(big.mark = ",")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(4, bold = TRUE)
+
+```
+
+After aggregating route-stop records into unique stop locations, the dataset contained 12,927 stops. No stops were removed for missing coordinates, indicating that all records had valid spatial information for mapping and spatial joins. The main reduction occurred when the dataset was clipped to the Philadelphia city boundary, which removed 5,339 stops outside the study area. The final analytic sample contains 7,588 Philadelphia bus stops. Zero-ridership stops were retained because the outcome is a count variable and Poisson models can accommodate zero values, allowing the model to capture the full range of weekday ridership conditions rather than only stops with existing passenger activity.
+
+**Data Cleaning Decisions:**
+
+- **Missing coordinates** (`r n_raw - n_after_coords` stops removed). Stops that have no latitude or longitude cannot be placed on the map or linked to neighborhood features, so they are dropped.
+- **Outside Philadelphia** (`r n_after_coords - n_after_philly` stops removed). SEPTA routes extend into surrounding counties, but this project focuses on Philadelphia. Stops outside the city boundary would have no matching neighborhood or Census features, so they are excluded.
+- The **`r n_after_philly` stops** in `stops_sf` make up the final sample used for all mapping, feature building, and modeling.
+
+------------------------------------------------------------------------
+
+# 3. Exploratory Data Analysis
+
+## 3.1 Distribution of Weekday Total
+
+```{r eda-histogram-raw}
+#| fig-cap: "Raw Distribution of Weekday Boardings per Stop"
+#| fig-width: 7
+#| fig-height: 4
+
+ggplot(stop_ridership_agg, aes(x = weekday_total)) +
+  geom_histogram(bins = 60, fill = "#2C7BB6", color = "white", alpha = 0.85) +
+  labs(title = "Weekday Boardings per Stop (Raw)",
+       x = "Weekday Boardings", y = "Number of Stops") +
+  theme_minimal()
+```
+
+The raw distribution is heavily right-skewed. Most stops have very few boardings, but a small number of stops record very high ridership. This kind of skew is common for count outcomes.
+
+## 3.2 Spatial Distribution of Bus Stops
+
+```{r eda-map-stops}
+#| fig-cap: "SEPTA Bus Stops by Weekday Boardings (Philadelphia, Summer 2025)"
+#| fig-width: 8
+#| fig-height: 7
+
+ggplot() +
+  geom_sf(data = philly, fill = "#f0f0f0", color = "grey60", linewidth = 0.5) +
+  geom_sf(
+    data = stops_sf,
+    aes(color = weekday_total),
+    size = 0.6,
+    alpha = 0.8
+  ) +
+  scale_color_viridis_c(
+    option = "magma",
+    direction = -1,
+    name = "Weekday\nBoardings",
+    trans = "log1p",
+    breaks = c(0, 100, 500, 1000, 2500, 5000),
+    labels = scales::comma
+  ) +
+  labs(
+    title = "SEPTA Bus Stop Ridership",
+    subtitle = "Summer 2025: Weekday Boardings per Stop"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+
+Stops with high ridership are clustered along major corridors in Center City, North Philadelphia, and West Philadelphia, where transit infrastructure is dense and many residents rely on transit. Stops in Northeast and Southwest Philadelphia tend to have much lower ridership.
+
+## 3.3 Ridership by Neighborhood
+
+```{r eda-neighborhood-join}
+
+stops_with_hood <- stops_sf %>%
+  st_join(neighborhoods %>% select(MAPNAME), join = st_within) %>%
+  st_drop_geometry()
+
+hood_ridership <- stops_with_hood %>%
+  group_by(MAPNAME) %>%
+  summarise(
+    avg_boardings   = round(mean(weekday_total, na.rm = TRUE), 1),
+    median_boardings = median(weekday_total, na.rm = TRUE),
+    n_stops         = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_boardings))
+```
+
+```{r eda-neighborhood-table}
+#| fig-cap: "Top 10 Neighborhoods by Average Weekday Boardings"
+hood_ridership %>%
+  slice_head(n = 10) %>%
+  kable(
+    col.names = c("Neighborhood", "Avg Boardings", "Median Boardings", "Number of Stops"),
+    caption = "Top 10 Neighborhoods by Average Weekday Boardings"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+```{r eda-neighborhood-map}
+#| fig-cap: "Average Weekday Boardings by Neighborhood"
+#| fig-width: 8
+#| fig-height: 7
+
+neighborhoods %>%
+  left_join(hood_ridership, by = "MAPNAME") %>%
+  ggplot() +
+  geom_sf(aes(fill = avg_boardings), color = "white", linewidth = 0.3) +
+  scale_fill_viridis_c(
+    option = "magma", direction = -1,
+    name = "Avg Weekday\nBoardings",
+    na.value = "grey85",
+    labels = scales::comma
+  ) +
+  labs(title = "Average Weekday Boardings by Neighborhood",
+       subtitle = "Summer 2025") +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+```
+
+Darker purple areas represent neighborhoods where the average bus stop has higher weekday boardings, while lighter yellow areas represent lower average stop activity. The map shows that weekday ridership is spatially uneven across the city, with higher average boardings concentrated in selected central and transit-oriented neighborhoods, including parts of Center City, South Philadelphia, West Philadelphia, and North Philadelphia. Lower average boardings appear more common in outer neighborhoods, particularly in portions of the Northeast and other lower-density edge areas.
+
+## 3.4 Demographic Correlates
+
+Because weekday boardings are heavily right-skewed, plotting them on the raw scale would compress most stops onto a flat band at the bottom and obscure any relationship with the demographic variables. To make the patterns readable, the y-axis in the scatter plots below is shown on a log scale (`log(weekday_total)`).
+
+```{r eda-census-join}
+stops_census <- stops_sf %>%
+  st_join(
+    acs_tracts %>% 
+      select(
+        no_vehicle_share, poverty_rate, pop_density,
+        transit_share, median_income_e, renter_share
+      ),
+    join = st_within
+  ) %>%
+  st_drop_geometry()
+```
+
+```{r eda-scatter}
+#| warning: false
+#| fig-cap: "Weekday Boardings vs. Key Demographic Variables"
+#| fig-width: 10
+#| fig-height: 8
+
+vars_labels <- c(
+  no_vehicle_share = "No-Vehicle HH Share",
+  poverty_rate     = "Poverty Rate",
+  pop_density      = "Population Density (per sq mi)",
+  transit_share    = "Transit Commute Share"
+)
+
+stops_census %>%
+  dplyr::select(
+    weekday_total,
+    no_vehicle_share,
+    poverty_rate,
+    pop_density,
+    transit_share
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -weekday_total,
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    variable = dplyr::recode(variable, !!!vars_labels)
+  ) %>%
+  ggplot(aes(x = value, y = log(weekday_total))) +
+  geom_point(alpha = 0.2, size = 0.8, color = "#2C7BB6") +
+  geom_smooth(method = "lm", color = "#D7191C", se = TRUE, linewidth = 1) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 2) +
+  labs(
+    title = "Log Weekday Boardings vs. Demographic Variables",
+    x = NULL,
+    y = "log(Weekday Boardings)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+Stops in tracts with higher no-vehicle household shares, higher poverty rates, and higher transit commute shares tend to have more weekday boardings. This matches the idea that transit-dependent residents make more trips by bus. Population density also shows a positive relationship, as denser areas tend to support more transit use. The wide scatter across all four plots suggests that no single variable explains ridership on its own, which points to the need for a multi-variable model.
+
+------------------------------------------------------------------------
+
+# 4. Feature Engineering
+
+Building on the EDA, we now construct the predictor set for modeling. Features fall into five groups: Census tract attributes (demographics + jobs), neighborhood identifiers for fixed effects, distances to the nearest amenities, density counts within a 1/2-mile pedestrian catchment, and route-level service characteristics. The end product is a single `stops_features` table with one row per bus stop, ready for Section 5.
+
+All spatial operations are performed in EPSG:2272 (Pennsylvania State Plane South, feet), which is the CRS used throughout Section 2. Distances and buffer widths are therefore in feet with no unit conversion.
+
+## 4.1 Census Tract and Employment Attributes
+
+We attach each stop to its surrounding Census tract with a point-in-polygon spatial join (`st_within`). This brings in the nine ACS variables built in Section 2.2 (no-vehicle share, poverty rate, renter share, transit commute share, bachelor's share, population density, housing density, and median income) together with the LODES tract-level job count. A small number of stops at the city edge fall just outside every tract polygon due to coordinate precision; these are assigned to the nearest tract with `st_nearest_feature()` rather than dropped.
+
+```{r fe-acs-join}
+acs_for_join <- acs_tracts %>%
+  select(geoid, no_vehicle_share, poverty_rate, renter_share,
+         transit_share, bachelors_share, pop_density, housing_density,
+         median_income = median_income_e)
+
+stops_acs <- stops_sf %>%
+  st_join(acs_for_join, join = st_nearest_feature) %>%
+  left_join(lodes_tract, by = c("geoid" = "tract_geoid")) %>%
+  mutate(total_jobs = replace_na(total_jobs, 0))
+```
+
+Every stop now carries the nine ACS features plus \`total_jobs\` from LODES.
+
+## 4.2 Neighborhood Identifiers
+
+We assign each bus stop to a Philadelphia neighborhood using a point-in-polygon spatial join, which identifies which neighborhood boundary each stop falls within. The neighborhood name is later used in Section 5 as a categorical fixed effect. This helps control for neighborhood-level differences that are not fully captured by the ACS variables, such as historic transit investment, local land-use patterns, or other place-based travel behaviors. For the small number of stops that do not fall inside any neighborhood polygon, we assign them to the nearest neighborhood so they can remain in the analysis.
+
+```{r fe-neighborhood}
+stops_hood <- stops_acs %>%
+  st_join(neighborhoods %>% select(MAPNAME), join = st_within)
+
+na_idx <- which(is.na(stops_hood$MAPNAME))
+if (length(na_idx) > 0) {
+  nearest_hood <- st_nearest_feature(stops_sf[na_idx, ], neighborhoods)
+  stops_hood$MAPNAME[na_idx] <- neighborhoods$MAPNAME[nearest_hood]
+}
+
+stops_hood <- stops_hood %>%
+  rename(neighborhood = MAPNAME) %>%
+  mutate(neighborhood = factor(neighborhood))
+
+n_neighborhoods <- nlevels(stops_hood$neighborhood)
+```
+
+Stops are distributed across **`r n_neighborhoods` neighborhoods**, which is the number of fixed effects the model will estimate.
+
+## 4.3 Distance to Nearest Amenity
+
+For each stop we compute the Euclidean distance to the nearest instance of five amenity types using `st_nearest_feature()` paired with `st_distance()`. Each raw distance is also log-transformed with `log1p`, because transit demand typically decays multiplicatively with distance rather than linearly.
+
+- **Schools.** Student ridership demand.
+- **Hospitals.** Consistent high-volume trip generators.
+- **Colleges and universities.** Dense student-commuter activity.
+- **Parks.** Leisure-trip generators.
+- **Rail and trolley stops.** Proximity to higher-order transit, a proxy for bus-to-rail transfer demand.
+
+```{r fe-distances}
+nearest_dist <- function(points, target) {
+  idx <- st_nearest_feature(points, target)
+  as.numeric(st_distance(points, target[idx, ], by_element = TRUE))
+}
+
+d_school   <- nearest_dist(stops_hood, schools)
+d_hospital <- nearest_dist(stops_hood, hospitals)
+d_college  <- nearest_dist(stops_hood, colleges)
+d_park     <- nearest_dist(stops_hood, parks)
+d_rail     <- nearest_dist(stops_hood, transit_stops)
+
+stops_dist <- stops_hood %>%
+  mutate(
+    dist_school       = d_school,
+    dist_hospital     = d_hospital,
+    dist_college      = d_college,
+    dist_park         = d_park,
+    dist_rail         = d_rail,
+    log_dist_school   = log1p(d_school),
+    log_dist_hospital = log1p(d_hospital),
+    log_dist_college  = log1p(d_college),
+    log_dist_park     = log1p(d_park),
+    log_dist_rail     = log1p(d_rail)
+  )
+```
+
+```{r fe-distances-summary}
+stops_dist %>%
+  st_drop_geometry() %>%
+  select(dist_school, dist_hospital, dist_college, dist_park, dist_rail) %>%
+  summarise(across(everything(),
+                   list(Median = median, Mean = mean, Max = max),
+                   .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", "Stat"),
+               names_sep = "__") %>%
+  pivot_wider(names_from = Stat, values_from = value) %>%
+  mutate(across(c(Median, Mean, Max), ~ round(.x, 0))) %>%
+  kable(caption = "Summary of Distance-to-Amenity Features (feet)",
+        format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+The median stop is within a few thousand feet of the nearest school and park. Distances to colleges and hospitals show much wider spread because those amenities are fewer and more geographically concentrated, which is exactly why log-transforming is appropriate before modeling.
+
+## 4.4 Density Counts within a 1/2-Mile Pedestrian Walkshed
+
+A 1/2-mile buffer (2,640 ft) corresponds to roughly a 10-minute walk at average pedestrian speed and is the standard catchment radius used in transit planning for stop-area demand analysis. Within each stop's buffer, we then count the features that drive trip generation and walkability.
+
+Counts are produced with `lengths(st_intersects())`, which is vectorized and processes all stops in a single pass per layer. For the parcel layer (several hundred thousand polygons), we convert parcels to representative points with `st_point_on_surface()` before counting to keep the intersection fast. Parcels are classified by the first digit of the Philadelphia land-use code (`c_dig1`): `1` = residential, `2` = commercial, `9` = vacant. Other codes (industrial, institutional, transportation, recreation, water) are grouped into "other" and not counted separately, because they either overlap with layers already captured (parks, schools) or contribute little to boarding demand.
+
+For the "other stops within buffer" feature, each stop's own point necessarily falls inside its own buffer, so we subtract one from the raw count.
+
+```{r fe-parcels-classify}
+#| warning: false
+parcels_lu <- parcels %>%
+  mutate(lu_class = case_when(
+    as.character(c_dig1) == "1" ~ "residential",
+    as.character(c_dig1) == "2" ~ "commercial",
+    as.character(c_dig1) == "9" ~ "vacant",
+    TRUE ~ "other"
+  )) %>%
+  st_point_on_surface()
+
+parcels_res <- parcels_lu %>% filter(lu_class == "residential")
+parcels_com <- parcels_lu %>% filter(lu_class == "commercial")
+parcels_vac <- parcels_lu %>% filter(lu_class == "vacant")
+```
+
+```{r fe-buffer-counts}
+buffer_ft <- 2640  # 1/2 mile ≈ 10-minute walk
+
+stop_buffers <- st_buffer(stops_dist, buffer_ft)
+
+count_in_buffer <- function(buffers, target) {
+  lengths(st_intersects(buffers, target))
+}
+
+stops_buf <- stops_dist %>%
+  mutate(
+    n_schools_halfmi       = count_in_buffer(stop_buffers, schools),
+    n_hospitals_halfmi     = count_in_buffer(stop_buffers, hospitals),
+    n_parks_halfmi         = count_in_buffer(stop_buffers, parks),
+    n_businesses_halfmi    = count_in_buffer(stop_buffers, businesses),
+    n_intersections_halfmi = count_in_buffer(stop_buffers, intersections),
+    n_crashes_halfmi       = count_in_buffer(stop_buffers, crashes),
+    n_other_stops_halfmi   = count_in_buffer(stop_buffers, stops_dist) - 1L,
+    n_residential_halfmi   = count_in_buffer(stop_buffers, parcels_res),
+    n_commercial_halfmi    = count_in_buffer(stop_buffers, parcels_com),
+    n_vacant_halfmi        = count_in_buffer(stop_buffers, parcels_vac)
+  )
+```
+
+```{r fe-buffer-summary}
+stops_buf %>%
+  st_drop_geometry() %>%
+  select(ends_with("_halfmi")) %>%
+  summarise(across(everything(),
+                   list(Median = median, Mean = mean, Max = max),
+                   .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", "Stat"),
+               names_sep = "__") %>%
+  pivot_wider(names_from = Stat, values_from = value) %>%
+  mutate(across(c(Median, Mean, Max), ~ round(.x, 1))) %>%
+  kable(caption = "Summary of 1/2-Mile Buffer Counts per Stop",
+        format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+The buffer summary shows that business licenses, residential parcels, and intersections have the largest raw counts within a half-mile of most stops, which is expected in a dense urban setting like Philadelphia. Residential parcels are especially common, with a median of 3,600 parcels per buffer, compared with 168 commercial parcels and 152 vacant parcels. This suggests that most bus stops are surrounded by housing-heavy land uses, even when commercial activity is also nearby. Crash counts are also relatively high, with a median of 267 crashes per buffer, but these should be interpreted as indicators of overall street activity and exposure rather than only unsafe driving behavior. In general, places with more people walking, driving, and transferring between modes are more likely to record higher crash counts.
+
+## 4.5 Route and Service Features
+
+Two remaining features describe the stop itself rather than its surroundings.
+
+- **`n_routes`**: the number of SEPTA bus routes serving the stop, carried over from the aggregation step in Section 2.1. Stops served by multiple routes function as transfer points and typically attract more boardings.
+- **`has_rail_access`**: a binary indicator for whether a rail or trolley stop lies within the same 1/2-mile buffer (i.e., `dist_rail` ≤ 2,640 ft). Rail access enables bus-to-rail chained trips and raises the effective service quality of the stop.
+
+```{r fe-service}
+stops_features <- stops_buf %>%
+  mutate(has_rail_access = as.integer(dist_rail <= buffer_ft)) %>%
+  # drop ridership columns not used as predictors
+  select(-c(weekday_alightings, saturday_boardings, saturday_alightings,
+            sunday_boardings, sunday_alightings)) # Removed x, y here as I got rid of them earlier
+```
+
+```{r fe-service-summary}
+stops_features %>%
+  st_drop_geometry() %>%
+  summarise(
+    `Stops (n)`              = n(),
+    `Mean routes per stop`   = round(mean(n_routes, na.rm = TRUE), 2),
+    `Max routes per stop`    = max(n_routes, na.rm = TRUE),
+    `Stops with rail access` = sum(has_rail_access),
+    `Share with rail access` = paste0(round(mean(has_rail_access) * 100, 1), "%")
+  ) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value") %>%
+  kable(caption = "Summary of Service Features") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+The resulting table `stops_features` has one row per bus stop and combines the outcome (`weekday_total`) with the tract attributes from 4.1, the neighborhood identifier from 4.2, the ten distance variables from 4.3, the ten buffer counts from 4.4, and the two service features above. This is the predictor set used in Section 5.
+
+## 4.6 Interaction and Polynomial Terms
+
+The features built in 4.1-4.5 enter a linear model additively, so each coefficient captures the effect of a single variable holding others constant. Transit ridership, however, is rarely additive: being car-free matters much more in a dense area than a sparse one, and the marginal effect of population density is usually larger once density is already high. To let the model capture these patterns without switching to a nonlinear method, we add a small set of two-way interactions and squared (quadratic) terms.
+
+**Interactions.** Three pairs are chosen because they have clear mechanism-level interpretation:
+
+- `no_vehicle_share × pop_density`: the combination of no-vehicle households and high population density identifies the most transit-dependent neighborhoods. Neither variable alone captures this joint concentration.
+- `no_vehicle_share × total_jobs`: car-free residents near job-dense tracts generate commute demand specifically for transit; car-owning residents in the same tract do not.
+- `n_commercial_halfmi × pop_density`: commercial density and residential density together define mixed-use high-flow corridors (think Center City or University City), where ridership exceeds the sum of the two individual effects.
+
+**Polynomial (quadratic) terms.** Three variables are expected to have nonlinear effects on ridership:
+
+- `pop_density²`: the relationship between density and ridership often accelerates rather than grows linearly; each additional resident per square mile adds more riders in already-dense areas.
+- `no_vehicle_share²`: at extreme no-vehicle shares, neighborhoods effectively rely on transit as the default travel mode, which can produce ridership levels beyond the linear trend.
+- `dist_rail²`: the distance-decay effect of rail proximity tends to flatten after a certain distance: being 1 mile from a rail stop versus 2 miles matters much less than being 0.1 mile versus 0.5 mile.
+
+These six new features are added directly to `stops_features`. Because they combine variables on very different scales (for example, `pop_density` can reach tens of thousands while `no_vehicle_share` is bounded between 0 and 1), their raw magnitudes differ widely. This does not affect OLS coefficient validity, but we will revisit scaling in Section 5 when interpreting the coefficients and checking multicollinearity.
+
+```{r fe-interactions}
+stops_features <- stops_features %>%
+  mutate(
+    no_vehicle_share = replace_na(no_vehicle_share, median(no_vehicle_share, na.rm = TRUE)),
+    poverty_rate     = replace_na(poverty_rate,     median(poverty_rate,     na.rm = TRUE)),
+    renter_share     = replace_na(renter_share,     median(renter_share,     na.rm = TRUE)),
+    transit_share    = replace_na(transit_share,    median(transit_share,    na.rm = TRUE)),
+    bachelors_share  = replace_na(bachelors_share,  median(bachelors_share,  na.rm = TRUE)),
+    pop_density      = replace_na(pop_density,      median(pop_density,      na.rm = TRUE)),
+    housing_density  = replace_na(housing_density,  median(housing_density,  na.rm = TRUE)),
+    median_income    = replace_na(median_income,    median(median_income,    na.rm = TRUE))
+  )
+
+stops_features <- stops_features %>%
+  mutate(
+    # Two-way interactions
+    int_novh_density       = no_vehicle_share * pop_density,
+    int_novh_jobs          = no_vehicle_share * total_jobs,
+    int_commercial_density = n_commercial_halfmi * pop_density,
+    # Squared (quadratic) terms
+    pop_density_sq         = pop_density^2,
+    no_vehicle_share_sq    = no_vehicle_share^2,
+    dist_rail_sq           = dist_rail^2
+  )
+```
+
+```{r fe-interactions-summary}
+stops_features %>%
+  st_drop_geometry() %>%
+  select(int_novh_density, int_novh_jobs, int_commercial_density,
+         pop_density_sq, no_vehicle_share_sq, dist_rail_sq) %>%
+  summarise(across(everything(),
+                   list(Median = median, Mean = mean, Max = max),
+                   .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", "Stat"),
+               names_sep = "__") %>%
+  pivot_wider(names_from = Stat, values_from = value) %>%
+  mutate(across(c(Median, Mean, Max), ~ round(.x, 2))) %>%
+  kable(caption = "Summary of Interaction and Polynomial Features",
+        format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+With these additions, `stops_features` now contains the base predictors from 4.1 to 4.5 plus six engineered terms that let the model represent joint effects and nonlinear responses.
+
+```{r fe-final-data-for-modeling}
+#| results: 'hide'
+st_write(stops_features, "data/stops_features.geojson", delete_dsn = TRUE)
+```
+
+------------------------------------------------------------------------
+
+# 5. Model Building
+
+Each modeling approach is appropriate for a different reason. The OLS models provide a useful baseline because they are easy to interpret and allow us to compare how model performance changes as additional predictors are added. We begin with demographic variables, then add distance, buffer, and service features to show which types of information improve prediction. The Poisson model is appropriate because weekday ridership is a count outcome, and Poisson regression is designed for non-negative count data. The Negative Binomial model will also be tested if ridership are strongly overdispersed, meaning the variance is much larger than the mean. In theory, Negative Binomial should be better suited to this type of uneven count data, especially when there are many low-ridership stops and a smaller number of very high-ridership stops.
+
+## 5.1 Linear Regression (OLS) and Evaluation
+
+We begin by loading the modeling-ready dataset built in Section 4. The OLS specifications below are estimated as a sequence of nested models, with each step adding a new group of predictors so that we can see which types of information actually improve fit.
+
+```{r import-geojson}
+#| results: 'hide'
+
+# Import data
+dat <- st_read("data/stops_features.geojson")
+
+```
+
+Before fitting any models, we construct one additional service-related predictor. SEPTA designates a subset of routes as frequent service routes, which run at higher headways throughout the weekday. Stops served by these routes typically attract more riders because shorter waits make transit more attractive. We count how many frequent routes serve each stop and classify the stop as Not Frequent, Frequent, or Very Frequent. This categorical predictor enters the later OLS, Poisson, and Negative Binomial models as a fixed effect.
+
+```{r add-freq-pred}
+
+# Adding a bus route frequency predictor
+
+# List of septa frequent buses
+
+freq_bus <- c(
+  "3", "6", "17", "18", "21",
+  "23", "33", "45", "46", "47",
+  "48", "51", "52", "56", "58",
+  "60", "63", "66", "70", "79",
+  "82", "108", "113", "BLVDDIR"
+  )
+
+# Count frequent routes serving stops
+
+freq_counts <- stop_ridership %>% 
+  filter(route %in% freq_bus) %>% 
+  group_by(stop_code) %>% 
+  summarise(n_freq_routes = n_distinct(route)) %>% 
+  ungroup()
+
+dat <- dat %>% 
+  left_join(freq_counts, by = "stop_code") %>% 
+  mutate(
+    n_freq_routes = replace_na(n_freq_routes, 0),
+    frequency = case_when(
+      n_freq_routes >= 2 ~ "Very Frequent",
+      n_freq_routes == 1 ~ "Frequent",
+      TRUE               ~ "Not Frequent"
+    ),
+    frequency = factor(frequency, levels = c("Not Frequent", "Frequent", "Very Frequent"))
+  )
+
+```
+
+**OLS 1: Demographic baseline.** This first specification uses only the ACS demographic and economic predictors. It serves as a baseline to show how much weekday ridership can be explained from neighborhood demographics alone, before any spatial or service-related information is added. Comparing later models against this one tells us how much each new feature group contributes.
+
+```{r build-ols-1}
+#| code-fold: true
+#| code-summary: "Show model code"
+# Base OLS model with only demographic predictors from ACS data
+
+ols1 <- lm(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs,
+  data = dat
+)
+
+summary(ols1)
+
+```
+
+**OLS 2: Adding spatial context.** This specification adds the distance-to-amenity features (school, hospital, college, park, rail) and the half-mile buffer counts (businesses, intersections, crashes, other stops, residential and vacant parcels). These features capture nearby trip generators and the built environment around each stop. We deliberately omit `n_commercial_halfmi` because it is highly correlated with `n_businesses_halfmi`, and we avoid stacking buffer counts on top of distance variables when the two clearly measure the same construct.
+
+```{r build-ols-2}
+#| code-fold: true
+#| code-summary: "Show model code"
+# Second OLS model with distance and buffer-based spatial predictors
+# We do not include n_commercial_halfmi due to multicollinearity with n_businesses_halfmi
+# We do not include buffer predictors where distance predictors are available due to multicollinearity
+
+ols2 <- lm(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs + #end ols1
+    dist_college + dist_school + dist_hospital + 
+    dist_park + dist_rail + # end dist preds
+    n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+    n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi, # end buff preds
+  data = dat
+)
+
+summary(ols2)
+
+```
+
+**OLS 3: Adding service features.** This specification adds two stop-level service variables: `n_routes`, the number of bus routes serving the stop (transfer points typically attract more boardings), and `has_rail_access`, a binary indicator for whether a rail or trolley stop falls within the half-mile buffer. After fitting, we run `vif()` to flag any predictors whose variance inflation factor is too high to interpret coefficients reliably.
+
+```{r build-ols-3}
+#| code-fold: true
+#| code-summary: "Show model code"
+# Third OLS model with service features
+
+ols3 <- lm(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs + #end ols1
+    dist_college + dist_school + dist_hospital + 
+    dist_park + dist_rail + # end dist preds
+    n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+    n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+    n_routes + has_rail_access, # end ols3
+  data = dat
+)
+
+summary(ols3)
+
+```
+
+**OLS 4: Adding fixed effects.** This final OLS specification adds the service-frequency category constructed earlier and a categorical neighborhood fixed effect. Neighborhood fixed effects soak up unmeasured place-based variation (historic transit investment, local land-use patterns, walkability, perceived safety) that the ACS variables cannot fully capture. Together these two sets of fixed effects account for service quality and place identity.
+
+```{r build-ols-4}
+#| code-fold: true
+#| code-summary: "Show model code"
+# Third OLS model including neighborhood and service frequency fixed effects 
+
+ols4 <- lm(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs + #end ols1
+    dist_college + dist_school + dist_hospital + 
+    dist_park + dist_rail + # end dist preds
+    n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+    n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+    n_routes + has_rail_access + # end ols3
+    frequency + as.factor(neighborhood), # end ols4
+  data = dat
+)
+
+summary(ols4)
+
+```
+
+## 5.2 Poisson Model and Evaluation
+
+Because `weekday_total` is a non-negative count rather than a continuous outcome, a Poisson generalized linear model is a more natural specification than OLS. We use the same predictor set as OLS 4 so that the comparison is direct.
+
+```{r fit-poisson}
+#| code-fold: true
+#| code-summary: "Show model code"
+# Fit Poisson model
+
+pois <- glm(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs + #end ols1
+    dist_college + dist_school + dist_hospital + 
+    dist_park + dist_rail + # end dist preds
+    n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+    n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+    n_routes + has_rail_access + # end ols3
+    frequency + as.factor(neighborhood), # end ols4
+  data = dat,
+  family = "poisson"
+)
+
+summary(pois)
+
+```
+
+A key Poisson assumption is that the conditional mean equals the conditional variance (dispersion = 1). Bus ridership is unlikely to satisfy this, as a small number of high-volume corridors create much more variance than the mean alone would predict. We compute the Pearson dispersion statistic to test whether this assumption holds.
+
+```{r od-test}
+
+dispersion <- sum(residuals(pois, type = "pearson")^2) / pois$df.residual
+
+cat("Dispersion parameter: ", round(dispersion, 2))
+
+```
+
+Since the dispersion parameter is greater than 1, we will now fit the Negative Binomial model.
+
+## 5.3 Negative Binomial Model and Evaluation
+
+Since the dispersion parameter is greater than 1, we will now fit the Negative Binomial model. We keep the same predictor set so that Poisson and Negative Binomial are directly comparable.
+
+```{r fit-nb}
+#| code-fold: true
+#| code-summary: "Show model code"
+
+# Given extreme overdispersion, we fit a negative binomial model
+
+nb <- glm.nb(
+  weekday_total ~
+    no_vehicle_share + poverty_rate + renter_share +
+    transit_share + bachelors_share + pop_density +
+    housing_density + median_income + total_jobs + #end ols1
+    dist_college + dist_school + dist_hospital + 
+    dist_park + dist_rail + # end dist preds
+    n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+    n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+    n_routes + has_rail_access + # end ols3
+    frequency + as.factor(neighborhood), # end ols4
+  data = dat
+)
+
+summary(nb)
+
+```
+
+# 6. Model Comparison (LOGOCV)
+
+```{r logocv}
+
+neighborhood <- unique(dat$neighborhood)
+
+all_results <- list()
+
+# OLS1: Demographic ACS Predictors
+
+for (i in seq_along(neighborhood)) {
+  
+  test_neighborhood <- neighborhood[i]
+  
+  # Split data
+  train_data <- dat %>% filter(neighborhood != test_neighborhood)
+  test_data <- dat %>% filter(neighborhood == test_neighborhood)
+  
+  # Fit models on training data
+  
+  # OLS 1: Demographic ACS Data
+  ols1cv <- lm(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs,
+    data = train_data
+  )
+  
+  # OLS 2: + Distance and Within Buffer Predictors
+  ols2cv <- lm(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs + #end ols1
+      dist_college + dist_school + dist_hospital + 
+      dist_park + dist_rail + # end dist preds
+      n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+      n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi, # end buff preds
+    data = train_data
+  )
+  
+  # OLS 3: + Service Features
+  ols3cv <- lm(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs + #end ols1
+      dist_college + dist_school + dist_hospital + 
+      dist_park + dist_rail + # end dist preds
+      n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+      n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+      n_routes + has_rail_access, # end ols3
+    data = train_data
+  )
+  
+  # OLS 4: + Bus Route Frequency Fixed Effects
+  # Remove Neighborhood Fixed Effects for LOGOCV
+  ols4cv <- lm(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs + #end ols1
+      dist_college + dist_school + dist_hospital + 
+      dist_park + dist_rail + # end dist preds
+      n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+      n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+      n_routes + has_rail_access + # end ols3
+      frequency, # end ols4
+    data = train_data
+  )
+  
+  # Poisson
+  # Remove Neighborhood Fixed Effects for LOGOCV
+  poiscv <- glm(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs + #end ols1
+      dist_college + dist_school + dist_hospital + 
+      dist_park + dist_rail + # end dist preds
+      n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+      n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+      n_routes + has_rail_access + # end ols3
+      frequency, # end ols4
+    data = train_data,
+    family = "poisson"
+  )
+  
+  # Negative Binomial
+  # Remove Neighborhood Fixed Effects for LOGOCV
+  nbcv <- glm.nb(
+    weekday_total ~
+      no_vehicle_share + poverty_rate + renter_share +
+      transit_share + bachelors_share + pop_density +
+      housing_density + median_income + total_jobs + #end ols1
+      dist_college + dist_school + dist_hospital + 
+      dist_park + dist_rail + # end dist preds
+      n_businesses_halfmi + n_intersections_halfmi + n_crashes_halfmi +
+      n_other_stops_halfmi + n_residential_halfmi + n_vacant_halfmi + # end ols2
+      n_routes + has_rail_access + # end ols3
+      frequency, # end ols4
+    data = train_data
+  )
+  
+  # Predict on test data
+  test_data <- test_data %>% 
+    mutate(
+      p1 = predict(ols1cv, newdata = test_data, type = "response"),
+      p2 = predict(ols2cv, newdata = test_data, type = "response"),
+      p3 = predict(ols3cv, newdata = test_data, type = "response"),
+      p4 = predict(ols4cv, newdata = test_data, type = "response"),
+      p5 = predict(poiscv, newdata = test_data, type = "response"),
+      p6 = predict(nbcv, newdata = test_data, type = "response"),
+    )
+  
+  # Calculate metrics
+  fold_results <- data.frame(
+    fold = test_neighborhood,
+    
+    mae_ols1 = mean(abs(test_data$weekday_total - test_data$p1), na.rm = TRUE),
+    mae_ols2 = mean(abs(test_data$weekday_total - test_data$p2), na.rm = TRUE),
+    mae_ols3 = mean(abs(test_data$weekday_total - test_data$p3), na.rm = TRUE),
+    mae_ols4 = mean(abs(test_data$weekday_total - test_data$p4), na.rm = TRUE),
+    mae_pois = mean(abs(test_data$weekday_total - test_data$p5), na.rm = TRUE),
+    mae_nb   = mean(abs(test_data$weekday_total - test_data$p6), na.rm = TRUE),
+    
+    rmse_ols1 = sqrt(mean((test_data$weekday_total - test_data$p1)^2, na.rm = TRUE)),
+    rmse_ols2 = sqrt(mean((test_data$weekday_total - test_data$p2)^2, na.rm = TRUE)),
+    rmse_ols3 = sqrt(mean((test_data$weekday_total - test_data$p3)^2, na.rm = TRUE)),
+    rmse_ols4 = sqrt(mean((test_data$weekday_total - test_data$p4)^2, na.rm = TRUE)),
+    rmse_pois = sqrt(mean((test_data$weekday_total - test_data$p5)^2, na.rm = TRUE)),
+    rmse_nb   = sqrt(mean((test_data$weekday_total - test_data$p6)^2, na.rm = TRUE))
+  )
+  
+  all_results[[i]] <- fold_results
+}
+
+cv_results <- bind_rows(all_results)
+
+tibble(cv_results)
+
+```
+
+```{r rmse-mae-medians-means}
+
+cv_summary_combined <- cv_results %>%
+  summarize(
+    across(
+      where(is.numeric),
+      list(mean = mean, median = median),
+      na.rm = TRUE
+    )
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("metric", "model", "stat"),
+    names_pattern = "(mae|rmse)_(.*)_(mean|median)"
+  ) %>%
+  mutate(
+    model = case_when(
+      model == "ols1" ~ "OLS 1: Base Demographic ACS Data",
+      model == "ols2" ~ "OLS 2: + Distance and Buffer Predictors",
+      model == "ols3" ~ "OLS 3: + Service Features",
+      model == "ols4" ~ "OLS 4: + Frequency FE",
+      model == "pois" ~ "Poisson",
+      model == "nb"   ~ "Negative Binomial"
+    ),
+    metric = toupper(metric),
+    stat = str_to_title(stat)
+  ) %>%
+  unite("column", stat, metric, sep = " ") %>%
+  pivot_wider(
+    names_from = column,
+    values_from = value
+  ) %>%
+  dplyr::select(
+    "Model" = model,
+    "Mean MAE",
+    "Median MAE",
+    "Mean RMSE",
+    "Median RMSE"
+  )
+
+cv_summary_combined %>%
+  kable(digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+
+
+```
+
+Notes about RMSE Averages:
+
+The Negative Binomial model is extremely sensitive to leaving out several high-ridership neighborhoods when compared to Poisson which is displayed by its extreme prediction errors in these cases:
+
+```{r}
+
+cv_results %>%
+  dplyr::select(fold, rmse_nb, rmse_pois) %>%
+  arrange(desc(rmse_nb)) %>%
+  DT::datatable(
+    options = list(
+      pageLength = 8,
+      scrollY = "300px",
+      scrollCollapse = TRUE
+    )
+  )
+
+```
+
+Overall, the Negative Binomial model is selected as the final model for this analysis because weekday bus stop ridership is an overdispersed count outcome. The dependent variable is a count of riders, so a count model is more appropriate than a linear regression model. The OLS models were useful as baseline comparisons because they showed how prediction changed as different variables were added. However, OLS is still a linear model and is not designed for count outcomes. It can produce predictions that do not match the structure of ridership data, especially when the outcome is highly uneven across stops.
+
+The Poisson model was also tested because it is designed for count data. In cross-validation, it produced the lowest average prediction errors among the models tested, which suggests that treating ridership as a count outcome improved predictive performance. However, the Poisson model had a very high dispersion parameter. This is a major limitation because a standard Poisson model assumes that the conditional mean and variance of the outcome are approximately equal. Bus stop ridership does not meet this assumption. Most stops have relatively low weekday ridership, while a smaller number of stops in major corridors, transfer areas, or high-activity neighborhoods have very high ridership. This creates overdispersion, meaning the variance is much larger than the mean.
+
+For this reason, the Poisson model is not selected as the final model even though it performed well on MAE and RMSE. The Negative Binomial model is preferred because it directly accounts for extra variation in count data beyond what the Poisson model allows. This makes it a more statistically appropriate model for explaining and diagnosing SEPTA bus stop ridership patterns.
+
+## 6.1 Error Diagnostics
+
+Because the Negative Binomial model had the lowest cross-validated MAE and RMSE, we use it as the final predictive model for the spatial error diagnostics. Mapping its prediction errors helps evaluate whether the model performs evenly across Philadelphia or whether it systematically underpredicts or overpredicts ridership in certain areas.
+
+```{r stop-level-error-map}
+#| fig-width: 9
+#| fig-height: 7
+
+# Create stop-level prediction errors
+dat_errors <- dat %>%
+  mutate(
+    pred_nb = predict(nb, newdata = dat, type = "response"),
+    error = weekday_total - pred_nb
+  )
+
+ggplot() +
+  geom_sf(
+    data = philly,
+    fill = "grey95",
+    color = "grey60",
+    linewidth = 0.4
+  ) +
+  geom_sf(
+    data = dat_errors,
+    aes(color = error),
+    size = 0.7,
+    alpha = 0.75
+  ) +
+  scale_color_gradient2(
+    low = "#2C7BB6",
+    mid = "white",
+    high = "#D7191C",
+    midpoint = 0,
+    limits = c(-100, 100),
+    oob = scales::squish,
+    name = "Error\nActual - Predicted",
+    breaks = c(-100, -50, 0, 50, 100),
+    labels = c("-100+", "-50", "0", "50", "100+")
+  ) +
+  labs(
+    title = "Bus Stop-Level Prediction Errors",
+    subtitle = "Red = underpredicted, blue = overpredicted"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+
+This map shows prediction errors at the individual bus stop level by comparing actual weekday ridership to the model’s predicted ridership. Red points represent stops where actual ridership was higher than predicted, meaning the model underpredicted demand. Blue points represent stops where actual ridership was lower than predicted, meaning the model overpredicted demand. Lighter points indicate smaller errors, while darker points indicate larger errors. Overall, the map shows that prediction errors are not evenly distributed across Philadelphia. Many stops have relatively small errors, but there are visible clusters of stronger red and blue errors along major bus corridors and in higher-activity areas. This suggests that the model captures the general spatial pattern of ridership, but it still struggles at specific stops where local demand conditions are more unusual, such as transfer points, dense commercial areas, or corridors with especially high service activity.
+
+# 7. Conclusion and Implementation
+
+This report developed a predictive model for estimating average weekday ridership at SEPTA bus stops in Philadelphia. The goal was to support transit planning decisions by identifying what types of locations are likely to generate stronger ridership demand. Because bus stop ridership is shaped by neighborhood demographics, nearby destinations, land use, transit access, and service characteristics, the analysis combined ACS demographic variables, spatial proximity measures, buffer-based built environment variables, and service features such as route count and frequency category.
+
+Several limitations should be considered when interpreting these results. First, the model is based on existing stop locations, so it learns from places where SEPTA already provides service. A proposed new stop may differ from existing stops in ways the model cannot fully capture. Second, some important factors are not included, such as sidewalk quality, stop amenities, bus reliability, schedule frequency by time of day, rider demographics at finer scales, safety perceptions, and special event demand. Finally, the cross-validation approach left out neighborhood fixed effects to avoid prediction failure when testing on unseen neighborhoods, so the comparison reflects a more generalizable version of the model rather than the full fitted specification.
+
+For implementation, this model should be used as a decision-support tool rather than a final decision rule. SEPTA or the City of Philadelphia could apply the model to candidate bus stop locations to estimate likely weekday ridership and compare alternatives. Locations with higher predicted ridership could be prioritized for further review, especially when they also improve access for transit-dependent populations or connect to major destinations. However, a key risk is that the model may favor places that already resemble existing high-ridership stops, while overlooking neighborhoods with high transit need but weaker existing service. Because the model is trained on current ridership patterns, it may also reflect past inequities in transit access. If some neighborhoods have historically received less frequent service, fewer nearby stops, or weaker connections to major destinations, the model could learn those patterns and unintentionally continue to under-prioritize them. For this reason, model results should be interpreted alongside equity, safety, and community-based criteria. In this sense, the model is best understood as an initial screening tool that can help planners identify promising locations, while still requiring local knowledge and equity review evaluation before any service changes are made.
+
+::: {style="font-size: 0.85em; color: #777777; margin-top: 2em; border-top: 1px solid #dddddd; padding-top: 1em;"}
+<strong>Note:</strong> Portions of the written text in this report were assisted by ChatGPT for grammatical correction, stylistic refinement, and clarity of expression. ChatGPT was also used to help identify coding errors and improve code readability. All analytical decisions, model construction, statistical interpretation, and final conclusions were determined and approved by the author.
+:::
+
