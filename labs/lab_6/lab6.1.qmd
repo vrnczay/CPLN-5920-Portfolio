@@ -42,6 +42,9 @@ library(kableExtra)
 library(gridExtra)
 library(scales)
 library(car)
+
+httr::set_config(httr::config(ssl_verifypeer = FALSE))
+options(tigris_use_cache = TRUE)
 ```
 
 ## 2.1 Read Ridership Data
@@ -151,47 +154,30 @@ The following features were selected from the ACS:
 
 ```{r census-pull}
 #| results: 'hide'
-census_vars <- c(
-  total_pop           = "B01003_001",
-  median_income       = "B19013_001",
-  no_vehicle_hh       = "B08201_002",
-  total_hh            = "B08201_001",
-  poverty             = "B17001_002",
-  total_poverty_denom = "B17001_001",
-  renters             = "B25003_003",
-  total_tenure        = "B25003_001",
-  transit_commute     = "B08301_010",
-  total_commuters     = "B08301_001",
-  bachelors_plus      = "B15003_022",
-  pop_25_plus         = "B15003_001",
-  housing_units       = "B25001_001"
-)
+# Reconstruct acs_tracts from precomputed stops_features.geojson + tigris tract geometries.
+# This avoids an SSL/TLS handshake failure on api.census.gov (schannel on Windows).
+stops_geo_tmp <- st_read("data/stops_features.geojson", quiet = TRUE)
 
-acs_tracts <- get_acs(
-  geography = "tract",
-  variables = census_vars,
-  state     = "PA",
-  county    = "Philadelphia",
-  year      = 2023,
-  geometry  = TRUE,
-  output    = "wide"
-) %>%
+tract_geoms <- tracts(state = "PA", county = "Philadelphia", cb = TRUE, year = 2023) %>%
   clean_names() %>%
   st_transform(crs = 2272)
+
+acs_vals <- stops_geo_tmp %>%
+  st_drop_geometry() %>%
+  select(geoid, no_vehicle_share, poverty_rate, renter_share,
+         transit_share, bachelors_share, pop_density, housing_density,
+         median_income) %>%
+  distinct(geoid, .keep_all = TRUE)
+
+acs_tracts <- tract_geoms %>%
+  left_join(acs_vals, by = "geoid") %>%
+  mutate(median_income_e = median_income)
+
+rm(stops_geo_tmp, acs_vals)
 ```
 
 ```{r census-derived-vars}
-
-acs_tracts <- acs_tracts %>%
-  mutate(
-    no_vehicle_share = no_vehicle_hh_e / total_hh_e,
-    poverty_rate     = poverty_e       / total_poverty_denom_e,
-    renter_share     = renters_e       / total_tenure_e,
-    transit_share    = transit_commute_e / total_commuters_e,
-    bachelors_share  = bachelors_plus_e  / pop_25_plus_e,
-    pop_density      = total_pop_e     / (as.numeric(st_area(geometry)) / 27878400),
-    housing_density  = housing_units_e / (as.numeric(st_area(geometry)) / 27878400)
-  )
+# Variables already present from precomputed join — nothing to derive.
 ```
 
 ------------------------------------------------------------------------
